@@ -280,5 +280,5 @@ For a full step-by-step walkthrough of algorithms, crash recovery, space calcula
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT) at your option.
+Licensed under either of [Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0) or [MIT License](licence.txt) at your option.
 
