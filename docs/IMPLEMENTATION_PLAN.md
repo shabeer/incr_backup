@@ -19,6 +19,7 @@
 9. [Diff Between Snapshots](#diff-between-snapshots)
 10. [Verify Command — What Gets Checked](#verify-command--what-gets-checked)
 11. [CLI Reference](#cli-reference)
+    - [Rclone Flags Integration & Safety Analysis for sync](#rclone-flags-integration--safety-analysis-for-sync)
 12. [Remote Directory Layout](#remote-directory-layout)
 13. [Rust vs Python — Revised Analysis](#rust-vs-python--revised-analysis)
 14. [Rust Code Documentation Guidelines](#rust-code-documentation-guidelines)
@@ -732,6 +733,57 @@ Example: `incr-backup init --retention aggressive` sets hourly=12, daily=14, wee
 - **Accidental Deletions**: Protects against accidental local retention typos silently triggering massive historical pruning.
 - **Visibility**: Both `incr-backup status` and `incr-backup verify` (Check 1) emit warning notices (`⚠`) whenever local and remote configs differ.
 
+### Rclone Flags Integration & Safety Analysis for `sync`
+
+#### Invocation Mechanism: Direct Flags vs. `extra_flags`
+Command-line arguments for `incr-backup` are parsed via `clap`. Raw rclone flags cannot be supplied directly as positional or direct options to `incr-backup sync` (e.g., executing `incr-backup sync --delete-excluded` is rejected by the CLI parser).
+
+Instead, custom rclone flags are forwarded to all underlying `rclone` subprocess calls via any of three mechanisms:
+1. **Global CLI Option (`--rclone-flags`)**:
+   ```bash
+   incr-backup --rclone-flags "--delete-excluded --delete-before --exclude-from /path/to/EXCLUDE_FILE.txt --transfers 16 --checkers 32 --no-update-dir-modtime --drive-chunk-size 64M --fast-list --links" sync --level hourly
+   ```
+2. **Configuration File (`incr-backup.toml`)**:
+   ```toml
+   [rclone]
+   path = "rclone"
+   extra_flags = "--delete-excluded --delete-before --exclude-from /path/to/EXCLUDE_FILE.txt --transfers 16 --checkers 32 --no-update-dir-modtime --drive-chunk-size 64M --fast-list --links"
+   ```
+3. **Environment Variable (`INCR_BACKUP_RCLONE_FLAGS`)**:
+   ```bash
+   export INCR_BACKUP_RCLONE_FLAGS="--delete-excluded --delete-before --exclude-from /path/to/EXCLUDE_FILE.txt --transfers 16 --checkers 32 --no-update-dir-modtime --drive-chunk-size 64M --fast-list --links"
+   incr-backup sync --level hourly
+   ```
+
+#### Directory Isolation: Why `.meta/` and `diffs/` Are NOT Deleted
+A primary concern when using destructive flags like `--delete-excluded` or `--delete-before` is whether internal metadata (`.meta/`) or snapshot history (`diffs/`) could be wiped out.
+
+- **Sync Target Scoping**: During `incr-backup sync`, the destination target of `rclone sync` is explicitly `<remote_path>/current/`:
+  ```bash
+  rclone sync <source_path> <remote_path>/current/ --backup-dir <remote_path>/diffs/<snapshot_name> <extra_flags...>
+  ```
+- **Sibling Directory Isolation**: Both `<remote_path>/.meta/` and `<remote_path>/diffs/` are sibling directories at the remote root, strictly outside `<remote_path>/current/`. `rclone sync` only analyzes and modifies files within the subtree of its target destination; it never scans or touches sibling directories.
+- **Backup-Dir Redirection**: Even inside `current/`, deleted or replaced files are not immediately destroyed; rclone server-side moves them into `--backup-dir` (`diffs/<snapshot_name>/`).
+
+#### Tabular Analysis of Flags
+
+| Flag | Supported via `extra_flags`? | Will it delete `.meta` or `diffs`? | Operational Behavior in `incr-backup sync` | Notes & Recommendations |
+| :--- | :---: | :---: | :--- | :--- |
+| **`--delete-excluded`** | **Yes** | **No** (Safe) | Deletes destination files inside `current/` that match exclusion rules. Because `--backup-dir` is active, rclone server-side moves excluded files out of `current/` into the active snapshot's `diffs/` folder instead of permanently deleting them. | Safe for `.meta/` and `diffs/`. Only affects files located inside `current/`. |
+| **`--delete-before`** | **Yes** | **No** (Safe) | Moves superseded files from `current/` into `--backup-dir` *before* initiating new file uploads, rather than during or after file transfers. | Useful when remote cloud storage quotas are tight to free up capacity early. Operates strictly within `current/`. |
+| **`--exclude-from EXCLUDE_FILE.txt`** | **Yes** | **No** (Safe) | Excludes source paths matching the rules in the specified text file. Combines additively with patterns configured in `[exclude]` within `incr-backup.toml`. | **Important:** Pass an absolute file path (e.g. `/etc/incr-backup/excludes.txt`). Avoid spaces in the file path because `split_whitespace()` breaks arguments on spaces. |
+| **`--transfers 16`** | **Yes** | **No** (Safe) | Sets parallel file transfers to 16 (default is 4). | Dramatically accelerates sync speeds when processing many small or medium files. |
+| **`--checkers 32`** | **Yes** | **No** (Safe) | Sets parallel hash / modification check threads to 32 (default is 8). | Significantly shortens the preliminary directory traversal and comparison phase. |
+| **`--no-update-dir-modtime`** | **Yes** | **No** (Safe) | Prevents updating directory modification times on the remote. | Minimizes unnecessary API calls on object storage and Google Drive where directory timestamp modifications incur extra requests. |
+| **`--drive-chunk-size 64M`** | **Yes** | **No** (Safe) | Sets Google Drive multipart upload buffer size to 64MB (default is 8MB). | Speeds up large file uploads on Google Drive. Note memory footprint: 16 transfers × 64MB = ~1.0 GB RAM. |
+| **`--fast-list`** | **Yes** | **No** (Safe) | Enables recursive listing (`ListR`) for providers that support it (Google Drive, S3, B2). | Reduces API calls and accelerates manifest generation, using slightly more local RAM to cache directory trees. |
+| **`--links`** | **Yes** | **No** (Safe) | Preserves symlinks by writing `.rclonelink` metadata files on cloud storage backends that do not natively support unix symlinks. | Essential if source tree contains symbolic links that need to be backed up and restored properly. |
+
+#### Key Technical Considerations
+1. **Whitespace Tokenization**: `Rclone::new` tokenizes `extra_flags` via `.split_whitespace()`. File paths (such as the argument to `--exclude-from`) must not contain unescaped spaces; use absolute paths without spaces.
+2. **Buffer Memory Scaling**: When combining `--transfers 16` with `--drive-chunk-size 64M`, memory allocation can reach $16 \times 64\text{ MB} = 1{,}024\text{ MB } (1\text{ GB})$ of RAM during concurrent uploads.
+3. **Symlink Translation**: With `--links`, rclone represents symlinks on Google Drive as `.rclonelink` files. `incr-backup restore` translates them back to local symlinks.
+
 ---
 
 ## Remote Directory Layout
@@ -1132,10 +1184,16 @@ Full test case documentation: [TEST_CASES.md](file:///Users/shabeer/git/shabeer_
 | 13 | "Is deduplication guaranteed?" | [Deduplication Guarantee](#deduplication-guarantee) — proof by invariant |
 | 14 | "Diff between any two snapshots" | [Diff Between Snapshots](#diff-between-snapshots) — manifest comparison with code |
 
-### Round 3 Comments (current)
+### Round 3 Comments
 
 | # | Comment | Where Addressed |
 |---|---|---|
 | 15 | "Check all comments addressed" | This audit table |
 | 16 | "Timeline for coding agent, not developer" | [Implementation Phases](#implementation-phases--ai-coding-agent-timeline) — 2-3 days |
 | 17 | "Make plan commentable" | This is now an artifact (commentable) |
+
+### Round 4 Comments (current)
+
+| # | Comment | Where Addressed |
+|---|---|---|
+| 18 | "Does incr-backup sync support rclone flags (--delete-excluded, etc.) without deleting .meta and diffs?" | [Rclone Flags Integration & Safety Analysis for sync](#rclone-flags-integration--safety-analysis-for-sync) — tabular breakdown & safety proof |
