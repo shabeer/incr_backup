@@ -272,8 +272,8 @@ To restore snapshot $S$:
 1. Load target manifest `.meta/manifests/<snapshot>.json`.
 2. Inspect all diff directories created between $S$ and now (ordered newest to oldest).
 3. For each file in the target manifest:
-   - If found in any diff directory between $S$ and now $\rightarrow$ download from `diffs/<snapshot_dir>/<file_path>`.
-   - If not found in any diff directory $\rightarrow$ the file was never modified, so download directly from `current/<file_path>`.
+   - If found in any diff directory between $S$ and now → download from `diffs/<snapshot_dir>/<file_path>`.
+   - If not found in any diff directory → the file was never modified, so download directly from `current/<file_path>`.
 4. Group resolved files by remote directory and download in batch with `rclone copy --files-from`.
 5. Optionally verify MD5 checksums of all restored files against the manifest (`--verify`).
 
@@ -497,19 +497,23 @@ To prevent two cron jobs or machines from running backups simultaneously:
 
 ### Deduplication Guarantee:
 Every unique version of a file exists in **exactly one location** on the remote:
-- If unchanged $\rightarrow$ lives only in `current/`.
-- If modified $\rightarrow$ old version lives only in `diffs/<snapshot>/`; latest version lives in `current/`.
+- If unchanged → lives only in `current/`.
+- If modified → old version lives only in `diffs/<snapshot>/`; latest version lives in `current/`.
 
 ### Worked Space Example (200 GB Source):
 - Source size: 200 GB (45,000 files)
 - Daily churn: ~2% = 4 GB/day (~0.5 GB/working hour)
 - Retention: 6 hourly, 7 daily, 4 weekly, 6 monthly = 23 total slots
 
-$$\text{Total Remote Storage} = S_{\text{source}} + N_{\text{slots}} \times \overline{\Delta}_{\text{per\_sync}}$$
+$$
+\text{Total Remote Storage} = S_{\text{source}} + N_{\text{slots}} \times \overline{\Delta}_{\text{per sync}}
+$$
 
-$$\text{Total Remote Storage} = 200\text{ GB} + 23 \times 0.5\text{ GB} = \mathbf{211.5\text{ GB}}\quad (\mathbf{1.06\times}\text{ of source})$$
+$$
+\text{Total Remote Storage} = 200\text{ GB} + 23 \times 0.5\text{ GB} = \mathbf{211.5\text{ GB}}\quad (\mathbf{1.06}\times\text{ of source})
+$$
 
-*(Compared to naive full copies which would require $23 \times 200\text{ GB} = 4,600\text{ GB}$.)*
+*(Compared to naive full copies which would require 23 × 200 GB = 4,600 GB.)*
 
 ---
 

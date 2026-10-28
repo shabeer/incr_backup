@@ -124,12 +124,14 @@ They're spread across multiple diff directories. Over a day with hourly syncs, 2
 
 ### Formula
 
-$$\text{Total} = S_{\text{source}} + N_{\text{slots}} \times \overline{\Delta}_{\text{per\_sync}}$$
+$$
+\text{Total} = S_{\text{source}} + N_{\text{slots}} \times \overline{\Delta}_{\text{per sync}}
+$$
 
 Where:
 - $S_{\text{source}}$ = current source size (200 GB)
-- $N_{\text{slots}}$ = total retention slots across all tiers (6+7+4+6 = 23)
-- $\overline{\Delta}_{\text{per\_sync}}$ = average size of changed/deleted files per sync (0.5 GB)
+- $N_{\text{slots}}$ = total retention slots across all tiers (6 + 7 + 4 + 6 = 23)
+- $\overline{\Delta}_{\text{per sync}}$ = average size of changed/deleted files per sync (0.5 GB)
 
 ### Comparison
 
@@ -825,7 +827,7 @@ A primary concern when using destructive flags like `--delete-excluded` or `--de
 
 #### Key Technical Considerations
 1. **Whitespace Tokenization**: `Rclone::new` tokenizes `extra_flags` via `.split_whitespace()`. File paths (such as the argument to `--exclude-from`) must not contain unescaped spaces; use absolute paths without spaces.
-2. **Buffer Memory Scaling**: When combining `--transfers 16` with `--drive-chunk-size 64M`, memory allocation can reach $16 \times 64\text{ MB} = 1{,}024\text{ MB } (1\text{ GB})$ of RAM during concurrent uploads.
+2. **Buffer Memory Scaling**: When combining `--transfers 16` with `--drive-chunk-size 64M`, memory allocation can reach 16 × 64 MB = 1,024 MB (~1 GB) of RAM during concurrent uploads.
 3. **Symlink Translation**: With `--links`, rclone represents symlinks on Google Drive as `.rclonelink` files. `incr-backup restore` translates them back to local symlinks.
 
 ---
