@@ -75,46 +75,46 @@
 | **Test Name**    | Adopt an existing rclone-synced remote directory |
 | **Preconditions** | `gdrive:backups/myhost` already contains files previously synced with plain `rclone sync` (flat file structure, no `.meta/`, no `current/`, no `diffs/`). |
 | **Steps**        | 1. Run `incr-backup init --remote gdrive:backups/myhost --source /home/user/docs --adopt` |
-| **Expected Result** | - Tool runs `rclone lsjson --recursive --hash` against the remote to scan all files. <br>- All existing files are moved (server-side) into `current/` subdirectory. Zero bytes re-uploaded. <br>- An initial manifest is created at `.meta/manifests/<timestamp>.json` listing every file with path, size, md5, mtime. <br>- `config.json` and `journal.json` are created. <br>- Exit code 0 with summary: "Adopted N files, total size X." |
+| **Expected Result** | - Tool emits warning notice: `[WARN] Adopting existing remote contents into 'current/'...` <br>- All existing files are moved (server-side) into `current/` subdirectory. Zero bytes re-uploaded. <br>- Missing directories (`diffs/`, `.meta/`, `.meta/manifests/`) are created. <br>- An initial manifest is created at `.meta/manifests/current.json` listing every file with path, size, md5, mtime. <br>- `config.json` is created. <br>- Exit code 0 with summary: "Adopted N files, total size X." |
 | **Category**     | e2e |
 
 ---
 
-### TC-INIT-004 — Adopt when remote has `.meta/` already
+### TC-INIT-004 — Init without `--adopt` on non-empty remote fails with suggestion
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-INIT-004 |
-| **Test Name**    | Adopt fails gracefully if `.meta/` directory already exists |
-| **Preconditions** | `gdrive:backups/myhost/.meta/` already exists (possibly from a prior init). |
-| **Steps**        | 1. Run `incr-backup init --remote gdrive:backups/myhost --source /home/user/docs --adopt` |
-| **Expected Result** | - Exit code non-zero. <br>- Error message: "Remote path already contains a `.meta/` directory. This appears to be an existing incr-backup namespace. Use `--force` to reinitialize, or remove `.meta/` manually." <br>- No files moved, no config written. |
+| **Test Name**    | Init fails and suggests --adopt if remote contains unmanaged files |
+| **Preconditions** | `gdrive:backups/myhost` contains unmanaged files and lacks required backup structure (`current/`, `.meta/`, `diffs/`). |
+| **Steps**        | 1. Run `incr-backup init --remote gdrive:backups/myhost --source /home/user/docs` |
+| **Expected Result** | - Exit code non-zero (1). <br>- Error message: "Remote 'gdrive:backups/myhost' contains existing files but is not an initialized backup namespace (missing required directories)." <br>- Suggestion/hint: "Hint: To adopt existing files into 'current/', re-run with '--adopt'." <br>- No files moved, no directories created, no config written. |
 | **Category**     | e2e |
 
 ---
 
-### TC-INIT-005 — Adopt when remote has `diffs/` already
+### TC-INIT-005 — Adopt on partially initialized remote overwrites config and adopts
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-INIT-005 |
-| **Test Name**    | Adopt fails if `diffs/` directory exists (ambiguous state) |
-| **Preconditions** | `gdrive:backups/myhost/diffs/` already exists on remote. |
+| **Test Name**    | Adopt on partial structure moves files, creates missing dirs, and overwrites config |
+| **Preconditions** | `gdrive:backups/myhost` has partial structure (e.g. `.meta/` exists from an interrupted init) plus unmanaged files at root. |
 | **Steps**        | 1. Run `incr-backup init --remote gdrive:backups/myhost --source /home/user/docs --adopt` |
-| **Expected Result** | - Exit code non-zero. <br>- Error: "Remote path contains a `diffs/` directory, suggesting it is already managed. Aborting adopt." |
+| **Expected Result** | - Warning emitted: `[WARN] Adopting existing remote contents into 'current/'...` <br>- All non-backup root contents moved into `current/`. <br>- Missing directories (`diffs/`, `current/`) created. <br>- `.meta/config.json` overwritten with new configuration options. <br>- Manifest indexed and uploaded. <br>- Exit code 0. |
 | **Category**     | e2e |
 
 ---
 
-### TC-INIT-006 — Init on already-initialized path (without --force)
+### TC-INIT-006 — Init on already-initialized path is a NO-OP
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-INIT-006 |
-| **Test Name**    | Double-init without --force is rejected |
-| **Preconditions** | `incr-backup init` has already been run successfully on this remote path. |
-| **Steps**        | 1. Run `incr-backup init --remote gdrive:backups/myhost --source /home/user/docs` |
-| **Expected Result** | - Exit code non-zero. <br>- Error: "Backup namespace already initialized at gdrive:backups/myhost. Use `--force` to reinitialize." |
+| **Test Name**    | Double-init is a successful NO-OP |
+| **Preconditions** | `current/`, `.meta/`, and `diffs/` already exist on `gdrive:backups/myhost`. |
+| **Steps**        | 1. Run `incr-backup init --remote gdrive:backups/myhost --source /home/user/docs` (or with `--adopt`) |
+| **Expected Result** | - Exit code 0. <br>- Info message: `[INFO] Remote already initialized at gdrive:backups/myhost; nothing to do.` <br>- Zero writes to remote; existing metadata untouched. <br>- `--adopt` flag is ignored if passed. <br>- If stray root items exist, emits warning: `[WARN] Unmanaged root files/directories detected in '<remote>'... Please manually delete or move them out.` |
 | **Category**     | e2e |
 
 ---
@@ -163,10 +163,10 @@
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-INIT-010 |
-| **Test Name**    | Adopt an existing but empty remote directory |
-| **Preconditions** | `gdrive:backups/myhost` exists but contains zero files. |
+| **Test Name**    | Adopt on empty remote silently ignores --adopt flag |
+| **Preconditions** | `gdrive:backups/myhost` exists but contains zero files/dirs. |
 | **Steps**        | 1. Run `incr-backup init --remote gdrive:backups/myhost --source /home/user/docs --adopt` |
-| **Expected Result** | - Exit code 0. <br>- `current/` created (empty). <br>- Initial manifest is created with zero entries. <br>- Summary: "Adopted 0 files, total size 0 B." |
+| **Expected Result** | - Exit code 0. <br>- `--adopt` is silently ignored (no adopt warning or move operation). <br>- `current/`, `diffs/`, `.meta/`, and initial manifest created. <br>- Summary: "✓ Initialized empty backup at gdrive:backups/myhost". |
 | **Category**     | e2e |
 
 ---

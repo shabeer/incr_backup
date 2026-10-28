@@ -389,12 +389,56 @@ fn cmd_init(
 
     let rclone = Rclone::new(&config);
 
-    // Check if already initialized
-    let meta_path = format!("{}/.meta/config.json", remote);
-    if rclone.cat(&meta_path).is_ok() {
-        return Err(IncrError::AlreadyInitialized {
+    // Inspect remote state
+    let root_entries = match rclone.lsf(remote) {
+        Ok(entries) => entries,
+        Err(IncrError::RcloneFailed { code, ref stderr, .. })
+            if code == 3 || stderr.to_lowercase().contains("directory not found") =>
+        {
+            Vec::new()
+        }
+        Err(e) => return Err(e),
+    };
+
+    let has_current = root_entries.iter().any(|e| e.trim_end_matches('/') == "current");
+    let has_meta = root_entries.iter().any(|e| e.trim_end_matches('/') == ".meta");
+    let has_diffs = root_entries.iter().any(|e| e.trim_end_matches('/') == "diffs");
+    let is_initialized = has_current && has_meta && has_diffs;
+
+    // Scenario 2: Remote is already initialized (NO-OP, ignore --adopt)
+    if is_initialized {
+        println!("[INFO] Remote already initialized at {}; nothing to do.", remote);
+        let stray_entries: Vec<&str> = root_entries
+            .iter()
+            .map(|e| e.as_str())
+            .filter(|e| {
+                let name = e.trim_end_matches('/');
+                name != "current" && name != ".meta" && name != "diffs"
+            })
+            .collect();
+        if !stray_entries.is_empty() {
+            eprintln!(
+                "[WARN] Unmanaged root files/directories detected in '{}' ({}). Please manually delete or move them out.",
+                remote,
+                stray_entries.join(", ")
+            );
+        }
+        return Ok(());
+    }
+
+    // Scenario 3: Remote is non-empty, missing backup structure, and --adopt was NOT passed
+    if !root_entries.is_empty() && !adopt {
+        return Err(IncrError::RemoteNotEmptyNeedsAdopt {
             remote: remote.to_string(),
         });
+    }
+
+    // Scenario 4 vs Scenario 1:
+    // If remote is not empty and adopt is true -> adopt flow.
+    // If remote is empty -> silently ignore --adopt flag.
+    let is_adopting = !root_entries.is_empty() && adopt;
+    if is_adopting {
+        println!("[WARN] Adopting existing remote contents into 'current/'...");
     }
 
     println!("Initializing backup:");
@@ -410,14 +454,10 @@ fn cmd_init(
         return Ok(());
     }
 
-    // Create directory structure
-    println!("Creating remote directory structure...");
+    // Create current/
     rclone.mkdir(&format!("{}/current/", remote))?;
-    rclone.mkdir(&format!("{}/diffs/", remote))?;
-    rclone.mkdir(&format!("{}/.meta/", remote))?;
-    rclone.mkdir(&format!("{}/.meta/manifests/", remote))?;
 
-    if adopt {
+    if is_adopting {
         // Move existing files to current/
         println!("Adopting existing files (server-side move, zero bandwidth)...");
         let move_excludes = vec![
@@ -428,7 +468,14 @@ fn cmd_init(
         rclone.move_dir(remote, &format!("{}/current/", remote), &move_excludes)?;
     }
 
-    // Upload config
+    // Create remaining directory structure
+    println!("Creating remote directory structure...");
+    rclone.mkdir(&format!("{}/diffs/", remote))?;
+    rclone.mkdir(&format!("{}/.meta/", remote))?;
+    rclone.mkdir(&format!("{}/.meta/manifests/", remote))?;
+
+    // Upload config (overwriting if already present)
+    let meta_path = format!("{}/.meta/config.json", remote);
     let remote_config = config.to_remote_config();
     let config_json = remote_config.to_json()?;
     rclone.rcat(&meta_path, &config_json)?;
@@ -445,6 +492,9 @@ fn cmd_init(
         &manifest_json,
     )?;
 
+    if is_adopting {
+        println!("✓ Adopted {} files into current/", manifest.file_count);
+    }
     println!("✓ Initialized {}", remote);
     println!("  {} files indexed ({})", manifest.file_count, format_size(manifest.total_size));
     println!("  Ready for incremental backups.");

@@ -96,6 +96,10 @@ pub enum IncrError {
     #[error("remote '{remote}' already initialized (has .meta/). Use a different path or delete existing backup.")]
     AlreadyInitialized { remote: String },
 
+    /// Remote contains files but is missing required backup structure and --adopt was not passed.
+    #[error("remote '{remote}' contains existing files but is not an initialized backup namespace (missing required directories).\nHint: To adopt existing files into 'current/', re-run with '--adopt'.")]
+    RemoteNotEmptyNeedsAdopt { remote: String },
+
     /// Source directory does not exist or is not readable.
     #[error("source directory not found: {0}")]
     SourceNotFound(PathBuf),

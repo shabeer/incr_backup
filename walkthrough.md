@@ -188,16 +188,26 @@ incr-backup restore hourly.1 --to /tmp/restore --path report.pdf --verify
 
 ### `init` & `init --adopt`
 
-#### Normal Init:
-Creates `.meta/`, `diffs/`, `current/`, and `.meta/manifests/` on the remote, then uploads `.meta/config.json`.
+`incr-backup init` inspects the remote state before taking action:
 
-#### Adopt Existing Remote (`--adopt`):
-If you already ran plain `rclone sync` to a Google Drive directory (e.g. `gdrive:mybackup/` with 200 GB of files), `--adopt` will:
-1. Validate that the remote has not already been initialized (no `.meta/` exists).
-2. Create `current/`, `diffs/`, and `.meta/`.
-3. Perform an **instant server-side move** of all pre-existing files into `current/` (`rclone move --exclude "current/**" --exclude ".meta/**" --exclude "diffs/**"`).
+#### 1. Empty Remote:
+Creates `current/`, `diffs/`, `.meta/`, and `.meta/manifests/` on the remote, then uploads `.meta/config.json` and initial manifest. If `--adopt` is provided on an empty remote, it is silently ignored.
+
+#### 2. Already Initialized Remote (`current/`, `.meta/`, `diffs/` present):
+Treated as a **pure NO-OP** (exit 0). Existing metadata is untouched and `--adopt` is ignored. If stray files/folders exist at root outside the backup triad, an informational notice is accompanied by a warning to manually delete or move them out.
+
+#### 3. Non-Empty Remote Missing Structure (Without `--adopt`):
+If the remote contains files/directories but lacks any of `current/`, `.meta/`, or `diffs/`, `incr-backup init` halts with an error (exit 1), prompting the user to re-run with `--adopt` to prevent leaving unmanaged files stranded at the remote root.
+
+#### 4. Adopt Existing Remote (`--adopt`):
+If you already ran plain `rclone sync` to a Google Drive directory (e.g. `gdrive:mybackup/` with 200 GB of files) or interrupted a previous adopt:
+1. Emits `[WARN] Adopting existing remote contents into 'current/'...`
+2. Creates `current/` directory if missing.
+3. Performs an **instant server-side move** of all non-backup files into `current/` (`rclone move --exclude "current/**" --exclude ".meta/**" --exclude "diffs/**"`).
 4. **Zero bytes of file data are uploaded**. 200 GB is organized in ~2-3 minutes.
-5. Scans `current/` via `rclone lsjson` to build the baseline manifest.
+5. Creates missing directories (`diffs/`, `.meta/`, `.meta/manifests/`).
+6. Overwrites `.meta/config.json` with the new backup configuration.
+7. Scans `current/` via `rclone lsjson` to build and upload the baseline manifest.
 
 ```bash
 incr-backup init --source /data/important --remote gdrive:backup --adopt

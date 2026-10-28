@@ -166,26 +166,29 @@ sequenceDiagram
 
     U->>T: incr-backup init<br/>--source /data<br/>--remote gdrive:mybackup<br/>--adopt
 
-    Note over T: Step 1: Validate — no existing .meta/ or diffs/
-    T->>R: rclone lsd gdrive:mybackup/
-    T->>T: Check: no .meta/, no diffs/, no current/
+    Note over T: Step 1: Pre-flight check via rclone lsf / lsjson
+    T->>R: rclone lsf gdrive:mybackup/
+    Note over T: If empty: silently ignore --adopt (fresh init)<br/>If has current/, .meta/, diffs/: ignore --adopt (NO-OP)<br/>If non-empty & missing >= 1 directory: proceed with adopt flow
 
-    Note over T: Step 2: Create directory structure
-    T->>R: rclone mkdir gdrive:mybackup/.meta/
-    T->>R: rclone mkdir gdrive:mybackup/.meta/manifests/
-    T->>R: rclone mkdir gdrive:mybackup/diffs/
+    Note over T: Step 2: Emit warning & create current/
+    T->>U: [WARN] Adopting existing remote contents into 'current/'...
     T->>R: rclone mkdir gdrive:mybackup/current/
 
-    Note over T: Step 3: Server-side move ALL existing files → current/
+    Note over T: Step 3: Server-side move non-backup existing files → current/
     T->>R: rclone move gdrive:mybackup/ gdrive:mybackup/current/<br/>--exclude "current/**"<br/>--exclude "diffs/**"<br/>--exclude ".meta/**"
     Note right of R: ⚡ Server-side move!<br/>Zero bandwidth.<br/>Zero extra storage.<br/>~2-5 min for 45K files.
 
-    Note over T: Step 4: Scan current/ for initial manifest
+    Note over T: Step 4: Create missing metadata directories
+    T->>R: rclone mkdir gdrive:mybackup/diffs/
+    T->>R: rclone mkdir gdrive:mybackup/.meta/
+    T->>R: rclone mkdir gdrive:mybackup/.meta/manifests/
+
+    Note over T: Step 5: Scan current/ for initial manifest
     T->>R: rclone lsjson --recursive --hash<br/>gdrive:mybackup/current/
     T->>T: Build manifest JSON from listing
 
-    Note over T: Step 5: Upload config + manifest
-    T->>R: Upload .meta/config.json
+    Note over T: Step 6: Overwrite config & upload manifest
+    T->>R: Upload .meta/config.json (overwrite existing)
     T->>R: Upload .meta/manifests/current.json
 
     T->>U: ✓ Adopted gdrive:mybackup/<br/>  200 GB moved to current/ (server-side, 0 bytes transferred)<br/>  45,231 files indexed<br/>  Ready for incremental backups.
@@ -200,7 +203,49 @@ sequenceDiagram
 
 ### What if adopt is interrupted?
 
-The journal tracks this step. Re-running `init --adopt` detects partial state (journal exists) and re-runs the `rclone move`, which is idempotent — already-moved files are skipped.
+The journal tracks this step. Re-running `incr-backup init --adopt` detects that required directories or metadata are incomplete (missing full triad), emits the adopt warning, re-runs the idempotent `rclone move` (skipping already-moved files), creates any missing directories, overwrites `.meta/config.json`, and finishes initial manifest indexing.
+
+---
+
+### Remote State Scenarios & Init/Adopt Decision Matrix
+
+Behavior of `incr-backup init --source <path> --remote <remote> [--adopt]`:
+
+| Scenario | Remote Contents / State | Flag Passed | Expected Action | Exit Code | Message / Output |
+|---|---|:---:|---|:---:|---|
+| **1. Empty Remote** | Remote directory does not exist or has 0 entries | *any* (silently ignore `--adopt`) | Fresh setup: create `current/`, `diffs/`, `.meta/`, `.meta/manifests/`, upload `config.json` & initial `current.json`. | **0** | `✓ Initialized empty backup at <remote>` (silently ignore `--adopt`, no adopt message printed). |
+| **2a. Clean Initialized Remote** | Contains `current/`, `.meta/`, and `diffs/` directories; **no stray entries** at root | *any* (ignore `--adopt`) | **Pure NO-OP**: zero writes to remote, metadata is untouched. | **0** | `[INFO] Remote already initialized at <remote>; nothing to do.` |
+| **2b. Initialized Remote with Stray Files** | Contains `current/`, `.meta/`, `diffs/` directories **AND unmanaged files/dirs** at root | *any* (ignore `--adopt`) | **NO-OP with Warning**: zero writes to remote. Warn user to clean up root. | **0** | `[INFO] Remote already initialized at <remote>; nothing to do.`<br>`[WARN] Unmanaged root files/directories detected in '<remote>' (<stray-items>). Please manually delete or move them out.` |
+| **3. Non-Empty, Missing Structure (No Adopt)** | Remote contains files/dirs but lacks at least one of `current/`, `.meta/`, `diffs/` | **Without `--adopt`** | **Reject & Halt**: prevent accidental corruption or stranded files at root. Prompt user to adopt. | **Non-zero (1)** | `[ERROR] Remote '<remote>' contains existing files but is not an initialized backup namespace (missing required directories).`<br>`Hint: To adopt existing files into 'current/', re-run with '--adopt'.` |
+| **4. Non-Empty, Adopt Requested** | Remote contains files/dirs but lacks at least one of `current/`, `.meta/`, `diffs/` | **With `--adopt`** | **Adopt**: show warning notice, server-side move all non-backup root contents into `current/` (excluding `current/**`, `diffs/**`, `.meta/**`), create missing directories, **overwrite `.meta/config.json`**, scan `current/`, and upload initial manifest. | **0** | `[WARN] Adopting existing remote contents into 'current/'...`<br>`✓ Adopted N files into current/`<br>`✓ Initialized <remote>` |
+
+#### Detailed Step-by-Step Logic for `incr-backup init`
+
+```mermaid
+flowchart TD
+    Start["incr-backup init --source &lt;S&gt; --remote &lt;R&gt; [--adopt]"] --> CheckSource{"Source path exists?"}
+    CheckSource -- No --> ErrSource["Exit 1: Source directory not found"]
+    CheckSource -- Yes --> ScanRemote["Inspect Remote Root via rclone lsf / lsjson"]
+
+    ScanRemote --> IsEmpty{"Remote Empty?"}
+    IsEmpty -- Yes --> FreshInit["Create current/, diffs/, .meta/<br/>Silently ignore --adopt<br/>Write .meta/config.json<br/>Generate current.json manifest<br/>Exit 0"]
+    
+    IsEmpty -- No --> CheckTriad{"Contains current/, .meta/, and diffs/?"}
+    
+    CheckTriad -- Yes --> CheckStray{"Stray root items present?"}
+    CheckStray -- No --> CleanNoOp["[INFO] Already initialized; nothing to do.<br/>Exit 0 (Pure NO-OP)"]
+    CheckStray -- Yes --> StrayWarn["[INFO] Already initialized; nothing to do.<br/>[WARN] Unmanaged root files found. Please delete/move them manually.<br/>Exit 0"]
+
+    CheckTriad -- No --> HasAdopt{"--adopt flag passed?"}
+    HasAdopt -- No --> RejectAdopt["[ERROR] Remote contains files but is missing backup structure.<br/>Hint: Re-run with '--adopt' to move contents into current/.<br/>Exit 1"]
+    HasAdopt -- Yes --> AdoptFlow["[WARN] Adopting existing remote contents into current/...<br/>rclone move non-backup items → current/<br/>Create current/, diffs/, .meta/ if missing<br/>Overwrite .meta/config.json<br/>Scan current/ → write current.json manifest<br/>Exit 0"]
+```
+
+#### Comparison vs Current Implementation (`src/main.rs`)
+- **Empty Remote**: Currently does not check remote emptiness; if `--adopt` is passed on empty remote, it runs `rclone move_dir` and prints adopt messages instead of silently ignoring `--adopt`.
+- **Initialized Remote**: Currently returns `Err(IncrError::AlreadyInitialized)` (exit code 1) instead of a successful NO-OP (exit code 0). Currently checks only `cat .meta/config.json` rather than the `current/`, `.meta/`, `diffs/` directory triad. Does not detect or warn about stray root entries.
+- **Missing Structure Without `--adopt`**: Currently does not check if remote is empty; silently proceeds, creating `current/` and `.meta/` while leaving existing files stranded at remote root without suggesting `--adopt`.
+- **Adopt Requested**: Currently performs `rclone move_dir` excluding `current/**`, `diffs/**`, `.meta/**`, but lacks pre-flight structure inspection, warning messaging, and explicit overwrite semantics.
 
 ---
 
@@ -1199,7 +1244,7 @@ Full test case documentation: [TEST_CASES.md](file:///Users/shabeer/git/shabeer_
 |---|---|---|
 | 18 | "Does incr-backup sync support rclone flags (--delete-excluded, etc.) without deleting .meta and diffs?" | [Rclone Flags Integration & Safety Analysis for sync](#rclone-flags-integration--safety-analysis-for-sync) — tabular breakdown & safety proof |
 
-### Round 5 Comments (current)
+### Round 5 Comments
 
 | # | Comment | Where Addressed |
 |---|---|---|
@@ -1208,3 +1253,10 @@ Full test case documentation: [TEST_CASES.md](file:///Users/shabeer/git/shabeer_
 | 21 | "Can we auto-update remote metadata (.meta/config.json) based on current retention in config file? What could be cons?" | [Why No Silent Auto-Update on sync](#why-no-silent-auto-update-on-sync) — transient safety & conflict analysis |
 | 22 | "Implement config push, pull, diff with no auto-update & mismatch warnings" | [CLI Reference](#cli-reference) & [TEST_CASES.md Section 18](file:///Users/shabeer/git/shabeer_incr_backup/docs/TEST_CASES.md#18-config-command--local--remote-metadata-sync) |
 | 23 | "Generate config/incr-backup-example.toml with rich documentation" | [Configuration File (`incr-backup-example.toml`)](file:///Users/shabeer/git/shabeer_incr_backup/config/incr-backup-example.toml) |
+
+### Round 6 Comments (current)
+
+| # | Comment | Where Addressed |
+|---|---|---|
+| 24 | "Clarify init and adopt behavior: empty remote (silently ignore --adopt), initialized remote as no-op (warn on stray files), non-empty suggestion & adopt warning (overwrite config)" | [Remote State Scenarios & Init/Adopt Decision Matrix](#remote-state-scenarios--initadopt-decision-matrix) — decision table, flowchart, and gap analysis |
+
