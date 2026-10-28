@@ -268,6 +268,7 @@ Test coverage includes:
 - **`test_locking.rs`**: Mutual exclusion, stale lock detection, and force break overrides.
 - **`test_verify.rs`**: Structural integrity, file counts, sizes, remote checksum verification, and space reports.
 - **`test_remove.rs`**: Single file and directory tree purging across current mirror and all historical diffs, manifest rewrites, dry-run mode, JSON output, and root protection.
+- **`test_config.rs`**: Bidirectional configuration sync (`config push`, `config pull`), diff inspection (`config diff`), overwrite safety guards, and retention divergence warnings in `status` and `verify`.
 
 ---
 
