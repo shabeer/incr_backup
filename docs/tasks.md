@@ -52,10 +52,12 @@
 | 24 | `test_locking.rs` Integration Tests | ✅ Done | 1/1 integration tests passing (mutual exclusion, --force override) |
 | 25 | `test_verify.rs` Integration Tests | ✅ Done | 1/1 integration tests passing (quick checks, --space, --check-hashes) |
 | 26 | `test_remove.rs` Integration Tests | ✅ Done | 7/7 integration tests passing (single file, directory, dry-run, JSON, root protection) |
-| 27 | Release Build | ✅ Done | Optimized standalone binary produced at `target/release/incr-backup` (3.1 MB) |
-| 28 | Documentation | ✅ Done | Updated all markdown files (`README.md`, `walkthrough.md`, `TEST_CASES.md`, `tasks.md`, `IMPLEMENTATION_PLAN.md`) |
-| 29 | Total Test Count | ✅ Done | **87 passed / 0 failed** across all test suites (75 unit + 12 integration) |
+| 27 | `config` Subcommands & Metadata Sync | ✅ Done | `config push`, `config pull`, `config diff`, and mismatch warnings in `status` and `verify` |
+| 28 | `test_config.rs` Integration Tests | ✅ Done | 1/1 integration tests passing (push, pull, diff, mismatch warning, overwrite guard) |
+| 29 | Release Build | ✅ Done | Optimized standalone binary produced at `target/release/incr-backup` (3.1 MB) |
+| 30 | Documentation | ✅ Done | Updated all markdown files (`README.md`, `walkthrough.md`, `TEST_CASES.md`, `tasks.md`, `IMPLEMENTATION_PLAN.md`) |
+| 31 | Total Test Count | ✅ Done | **98 passed / 0 failed** across all test suites (77 unit + 21 integration) |
 
 ---
 
-*Last updated: 2026-10-28T16:55+05:30*
+*Last updated: 2026-10-28T19:20+05:30*

@@ -19,6 +19,7 @@
    - [restore & location resolution](#restore--location-resolution)
    - [verify & space analysis](#verify--space-analysis)
    - [remove & snapshot history purging](#remove--snapshot-history-purging)
+   - [config: synchronizing local & remote metadata](#config-synchronizing-local--remote-metadata)
 5. [Crash Recovery: Write-Ahead Journal (WAL)](#5-crash-recovery-write-ahead-journal-wal)
 6. [Advisory Locking & Concurrency](#6-advisory-locking--concurrency)
 7. [Space Calculation & Deduplication Guarantee](#7-space-calculation--deduplication-guarantee)
@@ -369,6 +370,60 @@ incr-backup remove heavy_build_dir/ --dry-run
 # Output structured JSON result for automated pipelines
 incr-backup remove customer_records/ --json
 ```
+
+---
+
+### `config`: Synchronizing Local & Remote Metadata
+
+The remote stores a metadata record at `.meta/config.json`. Local configurations live in `incr-backup.toml` (or custom paths specified via `-c / --config`).
+
+The `config` command allows bidirectional synchronization and diff inspection between local configuration and remote metadata:
+
+#### 1. Inspect Differences (`config diff`):
+Checks local source, retention, and exclude patterns against `.meta/config.json`:
+```bash
+incr-backup config diff
+```
+If values differ, it highlights the mismatch (e.g. `Retention: (DIFFER)`).
+
+#### 2. Push Local Config to Remote (`config push`):
+Safely updates `.meta/config.json` while acquiring the advisory cloud lock:
+```bash
+# Push updated retention or exclude patterns:
+incr-backup config push
+
+# Preview changes without modifying remote metadata:
+incr-backup config push --dry-run
+
+# Force-break a stale lock if held:
+incr-backup config push --force
+```
+
+#### 3. Pull Remote Metadata to Local TOML (`config pull`):
+Retrieves `.meta/config.json` and writes a formatted TOML configuration file:
+```bash
+# Pull into ./incr-backup.toml (safely aborts if file exists):
+incr-backup config pull
+
+# Specify custom destination:
+incr-backup config pull --to ./my-host.toml
+
+# Explicitly overwrite existing local file:
+incr-backup config pull --overwrite
+```
+
+#### 4. Design Decision: Why No Silent Auto-Update?
+`incr-backup` intentionally does **not** auto-update `.meta/config.json` on every sync:
+- **Protects Transient Overrides**: Environment variables (e.g., `INCR_BACKUP_HOURLY=12`) and one-off test config files (`-c test.toml`) remain transient without polluting shared remote metadata.
+- **Multi-Host Safety**: Multiple machines backing up to the same namespace won't clobber each other's configurations.
+- **Snapshot Safety**: Accidental local edits don't trigger silent, irreversible remote snapshot prunes.
+- **Visibility**: Both `status` and `verify` (Check 1) display warning notices (`⚠`) whenever local and remote policies diverge.
+
+#### 5. When Does Cleanup Happen (Moving from Aggressive to Minimal)?
+When shifting from `aggressive` (12h/14d/8w/12m) to `minimal` (3h/3d/2w/3m):
+- Cleanup is **passive** and happens **only on rotation during `sync --level <tier>`**.
+- Each tier cleans up its own oldest snapshot when its rotation limit is reached.
+- Untouched tiers are unaffected until their specific sync level fires (e.g., `daily` snapshots are only pruned when `sync --level daily` runs).
 
 ---
 

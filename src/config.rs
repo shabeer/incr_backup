@@ -209,23 +209,23 @@ pub struct ExcludeConfig {
 // These mirror the TOML file layout. Serde deserializes TOML sections into
 // nested structs — like Python's configparser sections or Java Properties groups.
 
-/// Intermediate struct for deserializing the `[source]` TOML section.
-#[derive(Debug, Clone, Deserialize)]
+/// Intermediate struct for serializing and deserializing the `[source]` TOML section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TomlSource {
     path: String,
 }
 
-/// Intermediate struct for deserializing the `[remote]` TOML section.
-#[derive(Debug, Clone, Deserialize)]
+/// Intermediate struct for serializing and deserializing the `[remote]` TOML section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TomlRemote {
     path: String,
 }
 
 /// Top-level TOML file structure matching `incr-backup.toml`.
 ///
-/// This is a deserialization-only struct — we convert it into [`Config`] after
-/// loading. The `Option` fields handle missing TOML sections gracefully.
-#[derive(Debug, Clone, Deserialize)]
+/// Used for deserializing and serializing configuration files.
+/// The `Option` fields handle missing TOML sections gracefully.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TomlConfig {
     source: Option<TomlSource>,
     remote: Option<TomlRemote>,
@@ -505,6 +505,39 @@ impl Config {
             exclude_patterns: self.exclude.patterns.clone(),
         }
     }
+
+    /// Convert this configuration into a TOML-formatted string.
+    ///
+    /// Useful for writing out a local configuration file during `config pull`.
+    pub fn to_toml_string(&self) -> Result<String> {
+        let toml_config = TomlConfig {
+            source: if self.source_path.is_empty() {
+                None
+            } else {
+                Some(TomlSource {
+                    path: self.source_path.clone(),
+                })
+            },
+            remote: if self.remote_path.is_empty() {
+                None
+            } else {
+                Some(TomlRemote {
+                    path: self.remote_path.clone(),
+                })
+            },
+            retention: Some(self.retention.clone()),
+            rclone: Some(self.rclone.clone()),
+            exclude: if self.exclude.patterns.is_empty() {
+                None
+            } else {
+                Some(self.exclude.clone())
+            },
+        };
+
+        toml::to_string_pretty(&toml_config).map_err(|e| {
+            IncrError::Config(format!("failed to serialize config to TOML: {e}"))
+        })
+    }
 }
 
 // ─── Remote Config (stored on remote) ───────────────────────────────────────
@@ -522,7 +555,7 @@ impl Config {
 /// ## Analogy
 /// Like a database migration metadata table — stores enough info to
 /// understand the schema without the original migration scripts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteConfig {
     /// The local source path that was backed up.
     /// Informational — helps identify what this backup contains.
@@ -903,5 +936,56 @@ path = "gdrive:original"
     fn test_remote_config_from_invalid_json() {
         let result = RemoteConfig::from_json("not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_to_toml_string() {
+        let config = Config {
+            source_path: "/data/docs".to_string(),
+            remote_path: "gdrive:backups/host1".to_string(),
+            retention: RetentionConfig {
+                hourly: 3,
+                daily: 3,
+                weekly: 2,
+                monthly: 3,
+                min_interval_minutes: 30,
+            },
+            rclone: RcloneConfig::default(),
+            exclude: ExcludeConfig {
+                patterns: vec!["*.tmp".to_string()],
+            },
+            verbose: 0,
+            dry_run: false,
+        };
+
+        let toml_str = config.to_toml_string().unwrap();
+        assert!(toml_str.contains("/data/docs"));
+        assert!(toml_str.contains("gdrive:backups/host1"));
+        assert!(toml_str.contains("hourly = 3"));
+
+        // Verify it can be loaded back
+        let mut tmp_file = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp_file, toml_str.as_bytes()).unwrap();
+        let loaded = Config::load(tmp_file.path()).unwrap();
+        assert_eq!(loaded.source_path, "/data/docs");
+        assert_eq!(loaded.remote_path, "gdrive:backups/host1");
+        assert_eq!(loaded.retention.hourly, 3);
+        assert_eq!(loaded.exclude.patterns, vec!["*.tmp"]);
+    }
+
+    #[test]
+    fn test_example_config_file_parses() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let example_path = manifest_dir.join("config/incr-backup-example.toml");
+        assert!(example_path.exists());
+        let config = Config::load(&example_path).expect("example config should parse cleanly");
+        assert_eq!(config.source_path, "/home/user/documents");
+        assert_eq!(config.remote_path, "gdrive:backups/myhost");
+        assert_eq!(config.retention.hourly, 6);
+        assert_eq!(config.retention.daily, 7);
+        assert_eq!(config.retention.weekly, 4);
+        assert_eq!(config.retention.monthly, 6);
+        assert_eq!(config.retention.min_interval_minutes, 30);
+        assert!(config.exclude.patterns.contains(&"*.tmp".to_string()));
     }
 }

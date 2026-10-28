@@ -695,11 +695,17 @@ incr-backup remove <PATH>...  (alias: rm)
     --path <PATH>             Specific path to remove (repeatable)
     --force                   Break stale lock and run
     --json                    Output result as JSON
+
+incr-backup config <push|pull|diff>
+    push [--force]            Push local configuration to remote metadata (.meta/config.json)
+    pull [--to <PATH>] [--overwrite]
+                              Pull remote metadata into local configuration file
+    diff                      Compare local configuration vs remote metadata
 ```
 
-### `--retention` Presets
+### `--retention` Presets & Lifecycle
 
-These set the initial retention counts during `init`. Editable later via config file.
+These set the initial retention counts during `init`. Editable later via local configuration file (`incr-backup.toml`).
 
 | Preset | Hourly | Daily | Weekly | Monthly | Use Case |
 |---|---|---|---|---|---|
@@ -708,6 +714,23 @@ These set the initial retention counts during `init`. Editable later via config 
 | `minimal` | 3 | 3 | 2 | 3 | Save space, less history |
 
 Example: `incr-backup init --retention aggressive` sets hourly=12, daily=14, weekly=8, monthly=12.
+
+#### Changing Retention on an Existing Backup:
+1. Edit `[retention]` in local `incr-backup.toml` (template at `config/incr-backup-example.toml`).
+2. Run `incr-backup config diff` to review differences.
+3. Run `incr-backup config push` to update `.meta/config.json` on the remote under lock.
+
+#### When Does Cleanup Happen (e.g., Aggressive → Minimal)?
+- Changing configuration does **not** trigger immediate cleanup.
+- Cleanup occurs **passively on rotation during `sync --level <tier>`**.
+- If a tier has more snapshots than the configured limit (e.g., 12 hourly snapshots vs. minimal limit of 3), the single oldest snapshot and its manifest are deleted on each rotation until the count drops to the limit.
+- Tiers that are not executed remain untouched (e.g. daily/weekly snapshots are only pruned when their respective sync level runs).
+
+#### Why No Silent Auto-Update on `sync`?
+- **Transient Overrides**: Keeps CLI flags and environment variables (`INCR_BACKUP_HOURLY=12`) transient without overwriting persistent remote metadata.
+- **Multi-Host Safety**: Multiple hosts syncing to a remote namespace won't clobber each other's configurations.
+- **Accidental Deletions**: Protects against accidental local retention typos silently triggering massive historical pruning.
+- **Visibility**: Both `incr-backup status` and `incr-backup verify` (Check 1) emit warning notices (`⚠`) whenever local and remote configs differ.
 
 ---
 

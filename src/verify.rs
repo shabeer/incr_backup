@@ -5,7 +5,7 @@
 
 use log::{info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, RemoteConfig};
 use crate::error::Result;
 use crate::manifest::{format_size, Manifest};
 use crate::rclone::Rclone;
@@ -69,7 +69,7 @@ pub fn run_verify(config: &Config, rclone: &Rclone, options: &VerifyOptions) -> 
     info!("Verifying backup at {}", remote_base);
 
     // ── Check 1: Config exists ──────────────────────────────────────────
-    checks.push(check_config_exists(rclone, remote_base));
+    checks.push(check_config_exists(rclone, remote_base, config));
 
     // ── Check 2: Manifests exist ────────────────────────────────────────
     checks.push(check_manifests_exist(rclone, remote_base));
@@ -191,23 +191,55 @@ pub fn format_verify_result(result: &VerifyResult, remote_base: &str) -> String 
 
 // ── Individual Checks ───────────────────────────────────────────────────────
 
-fn check_config_exists(rclone: &Rclone, remote_base: &str) -> VerifyCheck {
+fn check_config_exists(rclone: &Rclone, remote_base: &str, config: &Config) -> VerifyCheck {
     let path = format!("{}/.meta/config.json", remote_base);
     match rclone.cat(&path) {
         Ok(contents) => {
-            match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(_) => VerifyCheck {
-                    number: 1,
-                    name: "Config valid".to_string(),
-                    status: CheckStatus::Passed,
-                    details: ".meta/config.json".to_string(),
-                },
-                Err(e) => VerifyCheck {
-                    number: 1,
-                    name: "Config valid".to_string(),
-                    status: CheckStatus::Failed(format!("invalid JSON: {e}")),
-                    details: String::new(),
-                },
+            match serde_json::from_str::<RemoteConfig>(&contents) {
+                Ok(remote_cfg) => {
+                    if remote_cfg.retention != config.retention {
+                        VerifyCheck {
+                            number: 1,
+                            name: "Config valid".to_string(),
+                            status: CheckStatus::Warning(format!(
+                                "retention differs from local (remote: {}h/{}d/{}w/{}m vs local: {}h/{}d/{}w/{}m). Run 'incr-backup config push' to sync",
+                                remote_cfg.retention.hourly,
+                                remote_cfg.retention.daily,
+                                remote_cfg.retention.weekly,
+                                remote_cfg.retention.monthly,
+                                config.retention.hourly,
+                                config.retention.daily,
+                                config.retention.weekly,
+                                config.retention.monthly,
+                            )),
+                            details: ".meta/config.json".to_string(),
+                        }
+                    } else {
+                        VerifyCheck {
+                            number: 1,
+                            name: "Config valid".to_string(),
+                            status: CheckStatus::Passed,
+                            details: ".meta/config.json".to_string(),
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Fall back to generic JSON validation
+                    match serde_json::from_str::<serde_json::Value>(&contents) {
+                        Ok(_) => VerifyCheck {
+                            number: 1,
+                            name: "Config valid".to_string(),
+                            status: CheckStatus::Passed,
+                            details: ".meta/config.json".to_string(),
+                        },
+                        Err(e) => VerifyCheck {
+                            number: 1,
+                            name: "Config valid".to_string(),
+                            status: CheckStatus::Failed(format!("invalid JSON: {e}")),
+                            details: String::new(),
+                        },
+                    }
+                }
             }
         }
         Err(e) => VerifyCheck {

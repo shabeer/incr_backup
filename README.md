@@ -127,11 +127,52 @@ incr-backup remove documents/confidential/
 incr-backup remove build/ --dry-run
 ```
 
+### 8. Manage Configuration Between Local and Remote (`config`)
+
+```bash
+# Compare local configuration vs remote metadata (.meta/config.json)
+incr-backup config diff
+
+# Push updated local retention/excludes to remote metadata
+incr-backup config push
+
+# Pull configuration from remote into a local TOML file
+# (refuses to overwrite existing files unless --overwrite is passed)
+incr-backup config pull --to ./incr-backup.toml
+```
+
+---
+
+## Retention Presets & Lifecycle
+
+### Built-in Presets (used with `--retention <PRESET>` during `init`):
+
+| Preset | Hourly | Daily | Weekly | Monthly | History Depth |
+|---|:---:|:---:|:---:|:---:|---|
+| **`default`** | 6 | 7 | 4 | 6 | ~6 hours + 1 week + 1 month + 6 months |
+| **`aggressive`** | 12 | 14 | 8 | 12 | ~12 hours + 2 weeks + 2 months + 1 year |
+| **`minimal`** | 3 | 3 | 2 | 3 | Space-saving profile (~3h + 3d + 2w + 3m) |
+
+### Changing Retention on an Existing Backup:
+1. Edit the `[retention]` section in your local `incr-backup.toml` (e.g. adjust to `minimal` numbers: 3/3/2/3).
+2. Run `incr-backup config diff` to review differences with remote metadata.
+3. Run `incr-backup config push` to update `.meta/config.json` on the remote.
+
+> [!NOTE]
+> **Why No Silent Auto-Update?**
+> The tool deliberately does *not* automatically overwrite `.meta/config.json` on every `sync`. This protects transient overrides (`INCR_BACKUP_HOURLY=...` or temporary test config files), prevents multi-machine configuration clobbering, and ensures operators are never caught off guard by unintended snapshot purges. `status` and `verify` will warn you whenever local and remote configs differ.
+
+### When Does Cleanup Happen (e.g. Aggressive → Minimal)?
+* **No immediate deletion**: Changing the configuration file does not delete snapshots on disk immediately.
+* **Tier-specific rotation**: Deletion is passive and happens only when a tier rotates during `sync --level <tier>`.
+* **Oldest pruned first**: If existing snapshots in a tier exceed the new limit (e.g. 12 snapshots vs. limit of 3), the single oldest snapshot and its manifest are purged on each rotation until the count reaches the limit.
+* **Untouched tiers**: If you switch to `minimal` but only run `sync --level hourly`, daily and weekly snapshots remain until their respective cron jobs (`sync --level daily`, etc.) trigger rotation.
+
 ---
 
 ## Configuration File (`incr-backup.toml`)
 
-You can create an `incr-backup.toml` file so you don't need to pass `--source` and `--remote` every time:
+A fully documented template with all options and presets is available in [`config/incr-backup-example.toml`](file:///Users/shabeer/git/shabeer_incr_backup/config/incr-backup-example.toml). You can create an `incr-backup.toml` file so you don't need to pass `--source` and `--remote` every time:
 
 ```toml
 [source]
@@ -174,6 +215,7 @@ Commands:
   diff     Show differences between two snapshots (--stat, --json, --only-added, --only-modified)
   verify   Verify backup integrity (--space, --check-hashes, --deep)
   remove   Remove a given directory or file(s) from all snapshots (alias: rm) (--path, --force, --json)
+  config   Manage configuration between local file and remote metadata (push, pull, diff)
   help     Print help information
 
 Global Options:

@@ -25,6 +25,7 @@
 - [15. Network & Remote Failures](#15-network--remote-failures)
 - [16. Multi-Source & Namespace Isolation](#16-multi-source--namespace-isolation)
 - [17. `remove` Command — History Purging](#17-remove-command--history-purging)
+- [18. `config` Command — Local & Remote Metadata Sync](#18-config-command--local--remote-metadata-sync)
 
 ---
 
@@ -1463,6 +1464,73 @@
 
 ---
 
+## 18. `config` Command — Local & Remote Metadata Sync
+
+### TC-CFG-001 — `config diff` detects differences between local config and remote metadata
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-CFG-001 |
+| **Test Name**    | Diff local TOML config against remote `.meta/config.json` |
+| **Preconditions** | Remote initialized with default retention (6h/7d/4w/6m). Local config edited to minimal (3h/3d/2w/3m). |
+| **Steps**        | 1. Run `incr-backup -c my-config.toml config diff` |
+| **Expected Result** | - Output displays `Retention: (DIFFER)`. <br>- Highlights local values vs remote values. <br>- Reports `Found 1 difference(s)`. |
+| **Category**     | integration |
+
+---
+
+### TC-CFG-002 — `status` and `verify` display warning notices on retention divergence
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-CFG-002 |
+| **Test Name**    | Retention mismatch warning emitted in status and verify |
+| **Preconditions** | Remote `.meta/config.json` has default retention. Local config has minimal retention. |
+| **Steps**        | 1. Run `incr-backup -c my-config.toml status`. <br>2. Run `incr-backup -c my-config.toml verify`. |
+| **Expected Result** | - `status` output displays remote retention and warning: `Local retention differs from remote metadata. Run incr-backup config push to sync`. <br>- `verify` Check 1 emits warning status `⚠ retention differs from local (...)`. |
+| **Category**     | integration |
+
+---
+
+### TC-CFG-003 — `config push` updates `.meta/config.json` under advisory cloud lock
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-CFG-003 |
+| **Test Name**    | Push local configuration to remote metadata |
+| **Preconditions** | Local configuration has updated retention or exclude patterns. |
+| **Steps**        | 1. Run `incr-backup -c my-config.toml config push`. <br>2. Run `incr-backup -c my-config.toml config diff`. |
+| **Expected Result** | - Remote lock acquired and released. <br>- Remote `.meta/config.json` updated with local settings. <br>- Subsequent `config diff` reports `Local configuration and remote metadata are identical`. |
+| **Category**     | integration |
+
+---
+
+### TC-CFG-004 — `config pull` writes remote metadata into local file with overwrite guard
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-CFG-004 |
+| **Test Name**    | Pull remote configuration into a local TOML file |
+| **Preconditions** | Remote `.meta/config.json` exists. Local destination path already exists. |
+| **Steps**        | 1. Run `incr-backup config pull --remote <REMOTE> --to existing.toml` without `--overwrite`. <br>2. Re-run with `--overwrite`. |
+| **Expected Result** | - Step 1 fails with error requiring `--overwrite`. <br>- Step 2 overwrites local file with valid TOML generated from remote metadata. |
+| **Category**     | integration |
+
+---
+
+### TC-CFG-005 — Configuration template validation
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-CFG-005 |
+| **Test Name**    | Validate syntax and parsing of `config/incr-backup-example.toml` |
+| **Preconditions** | File `config/incr-backup-example.toml` exists. |
+| **Steps**        | 1. Run unit test `test_example_config_file_parses` loading `config/incr-backup-example.toml`. |
+| **Expected Result** | - Successfully parses with `Config::load`. <br>- All fields, presets, comments, and globs verified. |
+| **Category**     | unit |
+
+---
+
 ## Appendix A: Test Case Summary
 
 | Section | ID Range | Count |
@@ -1484,7 +1552,8 @@
 | 15. Network & Remote | TC-NET-001 – TC-NET-005 | 5 |
 | 16. Multi-Source & Namespace | TC-NS-001 – TC-NS-004 | 4 |
 | 17. `remove` Command | TC-REM-001 – TC-REM-006 | 6 |
-| **Total** | | **107** |
+| 18. `config` Command | TC-CFG-001 – TC-CFG-005 | 5 |
+| **Total** | | **112** |
 
 ---
 

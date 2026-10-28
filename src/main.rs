@@ -199,6 +199,36 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Manage configuration between local file and remote metadata.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigAction {
+    /// Push local configuration to remote metadata (.meta/config.json).
+    Push {
+        /// Force update even if remote lock is held.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Pull remote metadata (.meta/config.json) into local configuration file.
+    Pull {
+        /// Destination path for the local config file (defaults to current --config path).
+        #[arg(long)]
+        to: Option<PathBuf>,
+
+        /// Overwrite local config file if it already exists.
+        #[arg(long)]
+        overwrite: bool,
+    },
+
+    /// Show differences between local configuration and remote metadata.
+    Diff,
 }
 
 fn main() {
@@ -294,6 +324,10 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
             json,
         } => {
             cmd_remove(config, paths, path, force, json)?;
+        }
+
+        Commands::Config { action } => {
+            cmd_config(config, action, &cli.config, dry_run)?;
         }
     }
 
@@ -627,6 +661,26 @@ fn cmd_status(config: Config) -> incr_backup::error::Result<()> {
         config.retention.min_interval_minutes,
     );
 
+    // Check remote retention mismatch
+    let meta_config_path = format!("{}/.meta/config.json", remote_base);
+    if let Ok(content) = rclone.cat(&meta_config_path) {
+        if let Ok(remote_cfg) = serde_json::from_str::<incr_backup::config::RemoteConfig>(&content) {
+            if remote_cfg.retention != config.retention {
+                println!(
+                    "Remote Ret: {}h / {}d / {}w / {}m (min interval: {}min)",
+                    remote_cfg.retention.hourly,
+                    remote_cfg.retention.daily,
+                    remote_cfg.retention.weekly,
+                    remote_cfg.retention.monthly,
+                    remote_cfg.retention.min_interval_minutes,
+                );
+                println!(
+                    "⚠ Warning:  Local retention differs from remote metadata. Run `incr-backup config push` to sync."
+                );
+            }
+        }
+    }
+
     // Check lock
     let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base);
     match lock_mgr.check()? {
@@ -834,6 +888,275 @@ fn cmd_remove(
             );
             println!("\nTip: If you do not want this file/directory backed up in future syncs, add it to 'exclude.patterns' in incr-backup.toml.");
         }
+    }
+
+    Ok(())
+}
+
+fn cmd_config(
+    config: Config,
+    action: ConfigAction,
+    cli_config_path: &Path,
+    dry_run: bool,
+) -> incr_backup::error::Result<()> {
+    match action {
+        ConfigAction::Push { force } => {
+            cmd_config_push(&config, force, dry_run)?;
+        }
+        ConfigAction::Pull { to, overwrite } => {
+            cmd_config_pull(&config, to, overwrite, cli_config_path, dry_run)?;
+        }
+        ConfigAction::Diff => {
+            cmd_config_diff(&config)?;
+        }
+    }
+    Ok(())
+}
+
+fn cmd_config_push(
+    config: &Config,
+    force: bool,
+    dry_run: bool,
+) -> incr_backup::error::Result<()> {
+    if config.remote_path.is_empty() {
+        return Err(IncrError::InvalidConfig(
+            "remote path is required. Specify [remote].path in config or use --remote".to_string(),
+        ));
+    }
+
+    let rclone = Rclone::new(config);
+    let remote_base = &config.remote_path;
+    let meta_path = format!("{}/.meta/config.json", remote_base);
+
+    // Acquire lock
+    let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base);
+    if !dry_run {
+        lock_mgr.acquire(force)?;
+    }
+
+    let res = (|| -> incr_backup::error::Result<()> {
+        // Read current remote config if present
+        let current_remote: Option<incr_backup::config::RemoteConfig> = rclone
+            .cat(&meta_path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok());
+
+        let target_remote = config.to_remote_config();
+
+        if let Some(ref cur) = current_remote {
+            if cur == &target_remote {
+                println!("Remote configuration (.meta/config.json) is already identical to local configuration.");
+                return Ok(());
+            }
+
+            println!("Updating remote metadata at {}:", meta_path);
+            if cur.retention != target_remote.retention {
+                println!(
+                    "  Retention: {}h/{}d/{}w/{}m → {}h/{}d/{}w/{}m",
+                    cur.retention.hourly,
+                    cur.retention.daily,
+                    cur.retention.weekly,
+                    cur.retention.monthly,
+                    target_remote.retention.hourly,
+                    target_remote.retention.daily,
+                    target_remote.retention.weekly,
+                    target_remote.retention.monthly
+                );
+            }
+            if cur.source_path != target_remote.source_path {
+                println!("  Source:    {} → {}", cur.source_path, target_remote.source_path);
+            }
+            if cur.exclude_patterns != target_remote.exclude_patterns {
+                println!("  Excludes:  {:?} → {:?}", cur.exclude_patterns, target_remote.exclude_patterns);
+            }
+        } else {
+            println!("Creating remote metadata at {}:", meta_path);
+            println!(
+                "  Retention: {}h/{}d/{}w/{}m",
+                target_remote.retention.hourly,
+                target_remote.retention.daily,
+                target_remote.retention.weekly,
+                target_remote.retention.monthly
+            );
+        }
+
+        if dry_run {
+            println!("[DRY-RUN] Would upload updated configuration to {}", meta_path);
+            return Ok(());
+        }
+
+        let json = target_remote.to_json()?;
+        rclone.rcat(&meta_path, &json)?;
+
+        println!("✓ Successfully pushed local configuration to remote metadata.");
+        Ok(())
+    })();
+
+    if !dry_run {
+        let _ = lock_mgr.release();
+    }
+
+    res
+}
+
+fn cmd_config_pull(
+    config: &Config,
+    to: Option<PathBuf>,
+    overwrite: bool,
+    cli_config_path: &Path,
+    dry_run: bool,
+) -> incr_backup::error::Result<()> {
+    if config.remote_path.is_empty() {
+        return Err(IncrError::InvalidConfig(
+            "remote path is required to pull configuration. Specify --remote or [remote].path in config".to_string(),
+        ));
+    }
+
+    let rclone = Rclone::new(config);
+    let remote_base = &config.remote_path;
+    let meta_path = format!("{}/.meta/config.json", remote_base);
+
+    let content = rclone.cat(&meta_path).map_err(|e| {
+        IncrError::Config(format!(
+            "failed to read remote metadata from '{}': {e}. Remote may not be initialized.",
+            meta_path
+        ))
+    })?;
+
+    let remote_config: incr_backup::config::RemoteConfig = serde_json::from_str(&content)
+        .map_err(|e| IncrError::Config(format!("failed to parse remote config JSON: {e}")))?;
+
+    let dest = to.unwrap_or_else(|| cli_config_path.to_path_buf());
+
+    if dest.exists() && !overwrite {
+        return Err(IncrError::Config(format!(
+            "local configuration file '{}' already exists. Use --overwrite to overwrite it.",
+            dest.display()
+        )));
+    }
+
+    let pulled_config = Config {
+        source_path: remote_config.source_path.clone(),
+        remote_path: remote_base.to_string(),
+        retention: remote_config.retention.clone(),
+        rclone: config.rclone.clone(),
+        exclude: incr_backup::config::ExcludeConfig {
+            patterns: remote_config.exclude_patterns.clone(),
+        },
+        verbose: config.verbose,
+        dry_run: false,
+    };
+
+    println!("Pulling configuration from {}:", meta_path);
+    println!("  Source:    {}", pulled_config.source_path);
+    println!("  Remote:    {}", pulled_config.remote_path);
+    println!(
+        "  Retention: {}h/{}d/{}w/{}m (min interval: {}min)",
+        pulled_config.retention.hourly,
+        pulled_config.retention.daily,
+        pulled_config.retention.weekly,
+        pulled_config.retention.monthly,
+        pulled_config.retention.min_interval_minutes,
+    );
+    if !pulled_config.exclude.patterns.is_empty() {
+        println!("  Excludes:  {:?}", pulled_config.exclude.patterns);
+    }
+
+    if dry_run {
+        println!("[DRY-RUN] Would write configuration to '{}'", dest.display());
+        return Ok(());
+    }
+
+    let toml_str = pulled_config.to_toml_string()?;
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                IncrError::Config(format!("failed to create directory '{}': {e}", parent.display()))
+            })?;
+        }
+    }
+    std::fs::write(&dest, toml_str).map_err(|e| {
+        IncrError::Config(format!("failed to write config to '{}': {e}", dest.display()))
+    })?;
+
+    println!("✓ Successfully wrote configuration to '{}'", dest.display());
+    Ok(())
+}
+
+fn cmd_config_diff(config: &Config) -> incr_backup::error::Result<()> {
+    if config.remote_path.is_empty() {
+        return Err(IncrError::InvalidConfig(
+            "remote path is required. Specify [remote].path in config or use --remote".to_string(),
+        ));
+    }
+
+    let rclone = Rclone::new(config);
+    let remote_base = &config.remote_path;
+    let meta_path = format!("{}/.meta/config.json", remote_base);
+
+    let content = rclone.cat(&meta_path).map_err(|e| {
+        IncrError::Config(format!(
+            "failed to read remote metadata from '{}': {e}. Remote may not be initialized.",
+            meta_path
+        ))
+    })?;
+
+    let remote_config: incr_backup::config::RemoteConfig = serde_json::from_str(&content)
+        .map_err(|e| IncrError::Config(format!("failed to parse remote config JSON: {e}")))?;
+
+    let target_remote = config.to_remote_config();
+
+    println!("Configuration comparison (Local vs Remote):");
+    println!("  Remote metadata: {}", meta_path);
+    println!();
+
+    let mut differences = 0;
+
+    if target_remote.source_path != remote_config.source_path {
+        println!("  Source Path:");
+        println!("    Local:  {}", target_remote.source_path);
+        println!("    Remote: {}", remote_config.source_path);
+        differences += 1;
+    } else {
+        println!("  Source Path: {} (match)", target_remote.source_path);
+    }
+
+    let r_local = &target_remote.retention;
+    let r_remote = &remote_config.retention;
+    if r_local != r_remote {
+        println!("  Retention: (DIFFER)");
+        println!(
+            "    Local:  {}h / {}d / {}w / {}m (min interval: {}m)",
+            r_local.hourly, r_local.daily, r_local.weekly, r_local.monthly, r_local.min_interval_minutes
+        );
+        println!(
+            "    Remote: {}h / {}d / {}w / {}m (min interval: {}m)",
+            r_remote.hourly, r_remote.daily, r_remote.weekly, r_remote.monthly, r_remote.min_interval_minutes
+        );
+        differences += 1;
+    } else {
+        println!(
+            "  Retention: {}h / {}d / {}w / {}m (min interval: {}m) (match)",
+            r_local.hourly, r_local.daily, r_local.weekly, r_local.monthly, r_local.min_interval_minutes
+        );
+    }
+
+    if target_remote.exclude_patterns != remote_config.exclude_patterns {
+        println!("  Exclude Patterns: (DIFFER)");
+        println!("    Local:  {:?}", target_remote.exclude_patterns);
+        println!("    Remote: {:?}", remote_config.exclude_patterns);
+        differences += 1;
+    } else {
+        println!("  Exclude Patterns: {:?} (match)", target_remote.exclude_patterns);
+    }
+
+    println!();
+    if differences == 0 {
+        println!("✓ Local configuration and remote metadata are identical.");
+    } else {
+        println!("⚠ Found {} difference(s).", differences);
+        println!("  Run `incr-backup config push` to update remote metadata from local config.");
+        println!("  Run `incr-backup config pull` to overwrite local config from remote metadata.");
     }
 
     Ok(())
