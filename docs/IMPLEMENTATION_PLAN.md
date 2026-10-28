@@ -27,7 +27,7 @@
 16. [Multiple Sources on Same Remote](#multiple-sources-on-same-remote)
 17. [Implementation Phases — AI Coding Agent Timeline](#implementation-phases--ai-coding-agent-timeline)
 18. [Cron Setup](#cron-setup)
-19. [Test Cases (107 Cases)](#test-cases-107-cases)
+19. [Test Cases (112 Cases)](#test-cases-112-cases)
 20. [Comment Audit — All Items Addressed](#comment-audit--all-items-addressed)
 
 ---
@@ -1119,7 +1119,7 @@ incr-backup sync --level daily  -s ~/Photos    -r gdrive:backups/photos
 
 ---
 
-## Test Cases (107 Cases)
+## Test Cases (112 Cases)
 
 Full test case documentation: [TEST_CASES.md](file:///Users/shabeer/git/shabeer_incr_backup/docs/TEST_CASES.md)
 
@@ -1144,7 +1144,8 @@ Full test case documentation: [TEST_CASES.md](file:///Users/shabeer/git/shabeer_
 | 15. Network & Remote Failures | TC-NET-001 – 005 | 5 |
 | 16. Multi-Source & Namespace | TC-NS-001 – 004 | 4 |
 | 17. `remove` Command | TC-REM-001 – 006 | 6 |
-| **Total** | | **107** |
+| 18. `config` Command | TC-CFG-001 – 005 | 5 |
+| **Total** | | **112** |
 
 ### Key Test Categories
 
@@ -1192,8 +1193,18 @@ Full test case documentation: [TEST_CASES.md](file:///Users/shabeer/git/shabeer_
 | 16 | "Timeline for coding agent, not developer" | [Implementation Phases](#implementation-phases--ai-coding-agent-timeline) — 2-3 days |
 | 17 | "Make plan commentable" | This is now an artifact (commentable) |
 
-### Round 4 Comments (current)
+### Round 4 Comments
 
 | # | Comment | Where Addressed |
 |---|---|---|
 | 18 | "Does incr-backup sync support rclone flags (--delete-excluded, etc.) without deleting .meta and diffs?" | [Rclone Flags Integration & Safety Analysis for sync](#rclone-flags-integration--safety-analysis-for-sync) — tabular breakdown & safety proof |
+
+### Round 5 Comments (current)
+
+| # | Comment | Where Addressed |
+|---|---|---|
+| 19 | "How to change retention presets of a backup?" | [`--retention` Presets & Lifecycle](#--retention-presets--lifecycle) |
+| 20 | "When does cleanup happen when moving from aggressive to minimal?" | [When Does Cleanup Happen](#when-does-cleanup-happen-eg-aggressive--minimal) |
+| 21 | "Can we auto-update remote metadata (.meta/config.json) based on current retention in config file? What could be cons?" | [Why No Silent Auto-Update on sync](#why-no-silent-auto-update-on-sync) — transient safety & conflict analysis |
+| 22 | "Implement config push, pull, diff with no auto-update & mismatch warnings" | [CLI Reference](#cli-reference) & [TEST_CASES.md Section 18](file:///Users/shabeer/git/shabeer_incr_backup/docs/TEST_CASES.md#18-config-command--local--remote-metadata-sync) |
+| 23 | "Generate config/incr-backup-example.toml with rich documentation" | [Configuration File (`incr-backup-example.toml`)](file:///Users/shabeer/git/shabeer_incr_backup/config/incr-backup-example.toml) |

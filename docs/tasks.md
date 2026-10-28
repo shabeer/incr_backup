@@ -8,7 +8,7 @@
 |---|--------|--------|-------|-------|
 | 1 | `Cargo.toml` | ✅ Done | 38 | All dependencies configured & fetched |
 | 2 | `error.rs` | ✅ Done | 159 | All error variants defined with thiserror |
-| 3 | `config.rs` | ✅ Done | 907 | Full config, presets, env overrides & 16 unit tests |
+| 3 | `config.rs` | ✅ Done | 991 | Full config, presets, env overrides, TOML generator & 19 unit tests |
 | 4 | `rclone.rs` | ✅ Done | 545 | Subprocess wrapper, streaming rcat, dry-run, recursive listing & 5 unit tests |
 | 5 | `manifest.rs` | ✅ Done | 473 | Manifest CRUD, rclone lsjson parser, diff & 10 unit tests |
 | 6 | `scanner.rs` | ✅ Done | 406 | Parallel MD5 (rayon+walkdir), glob exclude & 6 unit tests |
@@ -22,7 +22,7 @@
 | 9 | `journal.rs` | ✅ Done | 277 | WAL journal, step state machine, resume detection & 5 unit tests |
 | 10 | `snapshot.rs` | ✅ Done | 608 | Rotation, promotion, tier cascading & 11 unit tests |
 | 11 | `sync.rs` | ✅ Done | 733 | Full sync pipeline orchestration, WAL resume & 2 unit tests |
-| 12 | `main.rs` | ✅ Done | 716 | CLI entry point with clap derive, global flags, all subcommands dispatched |
+| 12 | `main.rs` | ✅ Done | 1163 | CLI entry point with clap derive, global flags, all subcommands (including config) |
 
 ## Phase 3: Restore, Diff & Remove
 
@@ -36,7 +36,7 @@
 
 | # | Module | Status | Lines | Notes |
 |---|--------|--------|-------|-------|
-| 16 | `verify.rs` | ✅ Done | 590 | 12 integrity checks (config, manifests, count, size, hash, lock, space) |
+| 16 | `verify.rs` | ✅ Done | 622 | 12 integrity checks (config sync, manifests, count, size, hash, lock, space) |
 
 ## Phase 5: Verification & Integration Testing
 
