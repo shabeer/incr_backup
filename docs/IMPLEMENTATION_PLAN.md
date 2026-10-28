@@ -2,7 +2,6 @@
 
 > Reverse-incremental snapshot backup for rclone GDrive remotes
 > 
-> Workspace: `~/git/shabeer_incr_backup`
 
 ---
 
@@ -1166,7 +1165,7 @@ incr-backup sync --level daily  -s ~/Photos    -r gdrive:backups/photos
 
 ## Test Cases (112 Cases)
 
-Full test case documentation: [TEST_CASES.md](file:///Users/shabeer/git/shabeer_incr_backup/docs/TEST_CASES.md)
+Full test case documentation: [TEST_CASES.md](docs/TEST_CASES.md)
 
 ### Summary
 
@@ -1223,12 +1222,11 @@ Full test case documentation: [TEST_CASES.md](file:///Users/shabeer/git/shabeer_
 | 6 | "Document complex Rust code for Java/Python developers" | [Rust Code Documentation Guidelines](#rust-code-documentation-guidelines) — 5 rules with examples |
 | 7 | "What happens with --hourly multiple times in an hour?" | [Multiple Runs Per Hour](#multiple-runs-per-hour--what-happens) — update-in-place default + --force-rotate |
 | 8 | "Does each run rotate ALL retention levels?" | [Rotation Semantics](#rotation-semantics--when-does-what-rotate) — NO, level-specific only, with 48h walkthrough |
-| 9 | "Use ~/git/shabeer_incr_backup" | Header + all references updated |
-| 10 | "How is resumability handled?" | [Resumability](#resumability--surviving-interruptions) — journal-based WAL with interruption matrix |
-| 11 | "Add test cases" | [Test Cases](#test-cases-101-cases) — 101 test cases across 16 sections |
-| 12 | "Avoid re-uploading 200GB" | [Adopt Existing Remote](#adopt-existing-remote-init---adopt) — `rclone move` (server-side) |
-| 13 | "Is deduplication guaranteed?" | [Deduplication Guarantee](#deduplication-guarantee) — proof by invariant |
-| 14 | "Diff between any two snapshots" | [Diff Between Snapshots](#diff-between-snapshots) — manifest comparison with code |
+| 9 | "How is resumability handled?" | [Resumability](#resumability--surviving-interruptions) — journal-based WAL with interruption matrix |
+| 10 | "Add test cases" | [Test Cases](#test-cases-101-cases) — 101 test cases across 16 sections |
+| 11 | "Avoid re-uploading 200GB" | [Adopt Existing Remote](#adopt-existing-remote-init---adopt) — `rclone move` (server-side) |
+| 12 | "Is deduplication guaranteed?" | [Deduplication Guarantee](#deduplication-guarantee) — proof by invariant |
+| 13 | "Diff between any two snapshots" | [Diff Between Snapshots](#diff-between-snapshots) — manifest comparison with code |
 
 ### Round 3 Comments
 
@@ -1251,8 +1249,8 @@ Full test case documentation: [TEST_CASES.md](file:///Users/shabeer/git/shabeer_
 | 19 | "How to change retention presets of a backup?" | [`--retention` Presets & Lifecycle](#--retention-presets--lifecycle) |
 | 20 | "When does cleanup happen when moving from aggressive to minimal?" | [When Does Cleanup Happen](#when-does-cleanup-happen-eg-aggressive--minimal) |
 | 21 | "Can we auto-update remote metadata (.meta/config.json) based on current retention in config file? What could be cons?" | [Why No Silent Auto-Update on sync](#why-no-silent-auto-update-on-sync) — transient safety & conflict analysis |
-| 22 | "Implement config push, pull, diff with no auto-update & mismatch warnings" | [CLI Reference](#cli-reference) & [TEST_CASES.md Section 18](file:///Users/shabeer/git/shabeer_incr_backup/docs/TEST_CASES.md#18-config-command--local--remote-metadata-sync) |
-| 23 | "Generate config/incr-backup-example.toml with rich documentation" | [Configuration File (`incr-backup-example.toml`)](file:///Users/shabeer/git/shabeer_incr_backup/config/incr-backup-example.toml) |
+| 22 | "Implement config push, pull, diff with no auto-update & mismatch warnings" | [CLI Reference](#cli-reference) & [TEST_CASES.md Section 18](docs/TEST_CASES.md#18-config-command--local--remote-metadata-sync) |
+| 23 | "Generate config/incr-backup-example.toml with rich documentation" | [Configuration File (`incr-backup-example.toml`)](config/incr-backup-example.toml) |
 
 ### Round 6 Comments (current)
 

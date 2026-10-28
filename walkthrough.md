@@ -541,12 +541,12 @@ For engineers familiar with Java/Python, this codebase follows these design mapp
 
 | Concept in Java / Python | Rust Implementation in `incr-backup` | Location |
 |---|---|---|
-| Checked Exceptions / `try-catch` | `Result<T, IncrError>` with `?` propagation | [`src/error.rs`](file:///Users/shabeer/git/shabeer_incr_backup/src/error.rs) |
-| `@ConfigurationProperties` / `configparser` | TOML deserialization with `serde` | [`src/config.rs`](file:///Users/shabeer/git/shabeer_incr_backup/src/config.rs) |
-| `ProcessBuilder` / `subprocess.Popen` | Subprocess command execution with stdout piping | [`src/rclone.rs`](file:///Users/shabeer/git/shabeer_incr_backup/src/rclone.rs) |
-| `Files.walk().parallelStream().map(md5)` | `walkdir::WalkDir` + `rayon::par_iter()` parallel hashing | [`src/scanner.rs`](file:///Users/shabeer/git/shabeer_incr_backup/src/scanner.rs) |
-| `FileLock` / `fcntl.flock` | JSON-based remote advisory lock manager | [`src/lock.rs`](file:///Users/shabeer/git/shabeer_incr_backup/src/lock.rs) |
-| State Machine / Workflow Engine | Write-Ahead Journal with step status transitions | [`src/journal.rs`](file:///Users/shabeer/git/shabeer_incr_backup/src/journal.rs) |
-| Dict diffing `set(a) ^ set(b)` | Manifest HashMap comparison (`diff_manifests`) | [`src/manifest.rs`](file:///Users/shabeer/git/shabeer_incr_backup/src/manifest.rs) |
-| `git filter-repo` / History Purging | Purge files/dirs across manifests, current/, and diffs/ | [`src/remove.rs`](file:///Users/shabeer/git/shabeer_incr_backup/src/remove.rs) |
+| Checked Exceptions / `try-catch` | `Result<T, IncrError>` with `?` propagation | [`src/error.rs`](src/error.rs) |
+| `@ConfigurationProperties` / `configparser` | TOML deserialization with `serde` | [`src/config.rs`](src/config.rs) |
+| `ProcessBuilder` / `subprocess.Popen` | Subprocess command execution with stdout piping | [`src/rclone.rs`](src/rclone.rs) |
+| `Files.walk().parallelStream().map(md5)` | `walkdir::WalkDir` + `rayon::par_iter()` parallel hashing | [`src/scanner.rs`](src/scanner.rs) |
+| `FileLock` / `fcntl.flock` | JSON-based remote advisory lock manager | [`src/lock.rs`](src/lock.rs) |
+| State Machine / Workflow Engine | Write-Ahead Journal with step status transitions | [`src/journal.rs`](src/journal.rs) |
+| Dict diffing `set(a) ^ set(b)` | Manifest HashMap comparison (`diff_manifests`) | [`src/manifest.rs`](src/manifest.rs) |
+| `git filter-repo` / History Purging | Purge files/dirs across manifests, current/, and diffs/ | [`src/remove.rs`](src/remove.rs) |
 

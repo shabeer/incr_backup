@@ -38,8 +38,8 @@
 ### From Source
 
 ```bash
-git clone https://github.com/shabeer/shabeer_incr_backup.git
-cd shabeer_incr_backup
+git clone https://github.com/shabeer/incr_backup.git
+cd incr_backup
 cargo build --release
 sudo cp target/release/incr-backup /usr/local/bin/
 ```
@@ -172,7 +172,7 @@ incr-backup config pull --to ./incr-backup.toml
 
 ## Configuration File (`incr-backup.toml`)
 
-A fully documented template with all options and presets is available in [`config/incr-backup-example.toml`](file:///Users/shabeer/git/shabeer_incr_backup/config/incr-backup-example.toml). You can create an `incr-backup.toml` file so you don't need to pass `--source` and `--remote` every time:
+A fully documented template with all options and presets is available in [`config/incr-backup-example.toml`](./config/incr-backup-example.toml). You can create an `incr-backup.toml` file so you don't need to pass `--source` and `--remote` every time:
 
 ```toml
 [source]
@@ -274,7 +274,7 @@ Test coverage includes:
 
 ## Detailed Documentation
 
-For a full step-by-step walkthrough of algorithms, crash recovery, space calculation formulas, and remote layout diagrams, see [**`walkthrough.md`**](file:///Users/shabeer/git/shabeer_incr_backup/walkthrough.md).
+For a full step-by-step walkthrough of algorithms, crash recovery, space calculation formulas, and remote layout diagrams, see [**`walkthrough.md`**](walkthrough.md).
 
 ---
 
