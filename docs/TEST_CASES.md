@@ -26,6 +26,7 @@
 - [16. Multi-Source & Namespace Isolation](#16-multi-source--namespace-isolation)
 - [17. `remove` Command — History Purging](#17-remove-command--history-purging)
 - [18. `config` Command — Local & Remote Metadata Sync](#18-config-command--local--remote-metadata-sync)
+- [19. `compact` Command — Dynamic Snapshot Consolidation](#19-compact-command--dynamic-snapshot-consolidation)
 
 ---
 
@@ -1609,6 +1610,125 @@
 
 ---
 
+## 19. `compact` Command — Dynamic Snapshot Consolidation
+
+### TC-COMP-001 — ISO-8601 timezone offset validation matching configured timezone
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-COMP-001 |
+| **Test Name**    | Explicit offset in `--from` and `--to` must match configured backup timezone |
+| **Preconditions** | Remote backup initialized with `timezone = "utc"`. |
+| **Steps**        | 1. Run `incr-backup compact --from 2026-10-28T00:00:00+05:30 --to 2026-10-28T23:59:59+05:30 --name daily-test --timezone utc`. <br>2. Run `incr-backup compact --from 2026-10-28T00:00:00Z --to 2026-10-28T23:59:59Z --name daily-test --timezone local` (on machine with +05:30). |
+| **Expected Result** | - Step 1 fails with: `Error: Timezone offset in --from (+05:30) does not match configured backup timezone (+00:00).`<br>- Step 2 fails with: `Error: Timezone offset in --from (+00:00) does not match configured backup timezone (+05:30).` <br>- Zero changes made to remote. |
+| **Category**     | integration |
+
+---
+
+### TC-COMP-002 — Zero snapshots in range gracefully exits
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-COMP-002 |
+| **Test Name**    | Zero snapshots found in user-specified date window |
+| **Preconditions** | Remote contains snapshots from 2026 only. |
+| **Steps**        | 1. Run `incr-backup compact --from 2025-01-01T00:00:00Z --to 2025-01-02T00:00:00Z --name empty-range --timezone utc` |
+| **Expected Result** | - Exits with code 1. <br>- Error message: `No snapshots found in range [2025-01-01T00:00:00Z, 2025-01-02T00:00:00Z]`. <br>- Zero remote files modified or deleted. |
+| **Category**     | integration |
+
+---
+
+### TC-COMP-003 — Single snapshot in range aliases/renames cleanly
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-COMP-003 |
+| **Test Name**    | Range contains exactly one snapshot |
+| **Preconditions** | Range contains a single snapshot `hourly.0__2026-10-28T08-00Z`. |
+| **Steps**        | 1. Run `incr-backup compact --from <range> --name daily-single` |
+| **Expected Result** | - Snapshot manifest renamed to `.meta/manifests/daily-single.json`. <br>- Diff directory moved to `diffs/daily-single/`. <br>- Manifest `snapshot_name` updated to `daily-single`. <br>- Exit code 0. |
+| **Category**     | integration |
+
+---
+
+### TC-COMP-004 — Concrete reverse-incremental walkthrough
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-COMP-004 |
+| **Test Name**    | Earliest-diff rule keeps required pre-range files and discards intermediate revisions |
+| **Preconditions** | Day 1 has `report.docx` ($V_A$), `budget.xlsx` ($V_1$), `logo.png` ($V_L$). <br>Day 2 runs: 10:00 (`diffs/snap-10:00` has $V_1$), 14:00 (`diffs/snap-14:00` has $V_A$), 20:00 (`diffs/snap-20:00` has $V_B$). <br>Day 3 run: 12:00 (`diffs/snap-12:00` has $V_C$). |
+| **Steps**        | 1. Run `incr-backup compact --from 2026-10-28T00:00:00Z --to 2026-10-28T23:59:59Z --name daily-2026-10-28 --timezone utc`. |
+| **Expected Result** | - Consolidated diff `diffs/daily-2026-10-28/` contains `report.docx` ($V_A$) and `budget.xlsx` ($V_1$). <br>- Intermediate diff revision $V_B$ is discarded. <br>- Source snapshots `snap-10:00`, `snap-14:00`, `snap-20:00` and manifests are purged. <br>- `.meta/manifests/daily-2026-10-28.json` records anchor state ($V_C, V_2, V_L$). |
+| **Category**     | integration |
+
+---
+
+### TC-COMP-005 — Full point-in-time restore across pre-range, consolidated, and post-range snapshots
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-COMP-005 |
+| **Test Name**    | Mathematically verifiable restore after compaction |
+| **Preconditions** | Compaction completed as in TC-COMP-004. |
+| **Steps**        | 1. `incr-backup restore daily-2026-10-28 --to /tmp/r_day2 --verify` <br>2. `incr-backup restore day-2026-10-27 --to /tmp/r_day1 --verify` <br>3. `incr-backup restore snap-12:00 --to /tmp/r_day3 --verify` |
+| **Expected Result** | - Step 1 restores Day 2 state ($V_C, V_2, V_L$) with MD5 verification passing. <br>- Step 2 restores Day 1 state ($V_A, V_1, V_L$) with MD5 verification passing. <br>- Step 3 restores Day 3 state ($V_D, V_2, V_L$) with MD5 verification passing. |
+| **Category**     | integration |
+
+---
+
+### TC-COMP-006 — Intra-range created and deleted file lifecycle
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-COMP-006 |
+| **Test Name**    | File created and deleted within compaction range is purged completely |
+| **Preconditions** | Pre-range snapshot $S_{\text{prev}}$ does NOT contain `temp.log`. <br>Intra-range snapshot 1 creates `temp.log`. <br>Intra-range snapshot 2 deletes `temp.log`, moving it into diff. |
+| **Steps**        | 1. Run `incr-backup compact --from <START> --to <END> --name daily-temp-test`. |
+| **Expected Result** | - `temp.log` is identified as intra-range scratch. <br>- Discarded completely; not present in `diffs/daily-temp-test/`. <br>- Storage reclaimed with zero leakage. |
+| **Category**     | integration |
+
+---
+
+### TC-COMP-007 — Compaction from beginning of history
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-COMP-007 |
+| **Test Name**    | Compacting snapshots from the beginning of history discards all diffs |
+| **Preconditions** | Range starts at the very first snapshot of the backup namespace (no older snapshots exist). |
+| **Steps**        | 1. Run `incr-backup compact` covering all initial snapshots. |
+| **Expected Result** | - Compactor detects $S_{\text{prev}} = \text{None}$. <br>- All intra-range diffs are safely discarded because no pre-range history exists to reference them. <br>- Anchor manifest preserved at `.meta/manifests/<name>.json`. |
+| **Category**     | integration |
+
+---
+
+### TC-COMP-008 — Dry-run visibility with `--summary` and `--full-list`
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-COMP-008 |
+| **Test Name**    | Dry-run previews plan without modifying any remote data |
+| **Preconditions** | Multiple snapshots in range. |
+| **Steps**        | 1. Run `incr-backup compact --from <START> --to <END> --name <NAME> --dry-run --summary`. <br>2. Run `incr-backup compact --from <START> --to <END> --name <NAME> --dry-run --full-list`. |
+| **Expected Result** | - Step 1 prints high-level summary (range, snapshots in range, anchor, files kept/discarded counts and bytes). <br>- Step 2 prints detailed file-by-file plan (+ kept, - discarded with reasons, manifest and purge actions). <br>- Remote diffs and manifests remain 100% untouched. |
+| **Category**     | integration |
+
+---
+
+### TC-COMP-009 — Advisory cloud locking and concurrency protection
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-COMP-009 |
+| **Test Name**    | Compaction acquires exclusive lock and refuses concurrent execution |
+| **Preconditions** | Active lock exists at `.meta/lock`. |
+| **Steps**        | 1. Run `incr-backup compact` without `--force`. <br>2. Run with `--force`. |
+| **Expected Result** | - Step 1 fails with `backup locked by '<holder>'`. <br>- Step 2 breaks stale lock, acquires advisory lock, performs compaction, and releases lock upon completion. |
+| **Category**     | integration |
+
+---
+
 ## Appendix A: Test Case Summary
 
 | Section | ID Range | Count |
@@ -1631,7 +1751,8 @@
 | 16. Multi-Source & Namespace | TC-NS-001 – TC-NS-004 | 4 |
 | 17. `remove` Command | TC-REM-001 – TC-REM-006 | 6 |
 | 18. `config` Command | TC-CFG-001 – TC-CFG-005 | 5 |
-| **Total** | | **114** |
+| 19. `compact` Command | TC-COMP-001 – TC-COMP-009 | 9 |
+| **Total** | | **123** |
 
 ---
 

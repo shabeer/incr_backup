@@ -17,6 +17,7 @@
    - [list & status](#list--status)
    - [diff between snapshots](#diff-between-snapshots)
    - [restore & location resolution](#restore--location-resolution)
+   - [compact & Dynamic Snapshot Consolidation](#compact--dynamic-snapshot-consolidation)
    - [verify & space analysis](#verify--space-analysis)
    - [remove & snapshot history purging](#remove--snapshot-history-purging)
    - [config: synchronizing local & remote metadata](#config-synchronizing-local--remote-metadata)
@@ -83,6 +84,8 @@ gdrive:backup/myhost/
 │   │   └── documents/
 │   │       └── report.pdf               (previous version before 8:00 AM edit)
 │   ├── hourly.1__2026-10-28T07-00Z/
+│   ├── daily-2026-10-28/                👈 Compacted from Day 2 runs
+│   ├── weekly-2026-W43/                 👈 Compacted from 7 dailies
 │   ├── daily.0__2026-10-27T00-00Z/
 │   │   └── photos/
 │   │       └── deleted-photo.jpg        (deleted from source, safely preserved)
@@ -93,10 +96,13 @@ gdrive:backup/myhost/
     ├── config.json                      👈 Remote backup configuration & retention
     ├── journal.json                     👈 Write-ahead log (only present during sync)
     ├── lock                             👈 Mutual exclusion lock (holds PID & host)
+    ├── staging/                         👈 Safe staging during compaction (ephemeral)
     └── manifests/                       👈 Table of contents for each snapshot point
         ├── current.json                 (describes current state)
         ├── hourly.0.json                (describes snapshot at hourly.0)
         ├── hourly.1.json
+        ├── daily-2026-10-28.json        (manifest for compacted daily snapshot)
+        ├── weekly-2026-W43.json         (manifest for compacted weekly snapshot)
         └── daily.0.json
 ```
 
@@ -303,12 +309,91 @@ To restore snapshot $S$:
 # Restore entire snapshot
 incr-backup restore daily.0 --to /restore/full
 
+# Restore consolidated snapshot
+incr-backup restore daily-2026-10-28 --to /restore/day2 --verify
+
 # Restore single file or subfolder
 incr-backup restore daily.0 --to /restore/docs --path documents/taxes/
 
 # Overwrite existing destination
 incr-backup restore daily.0 --to /existing/dir --overwrite --verify
 ```
+
+---
+
+### `compact` & Dynamic Snapshot Consolidation
+
+#### The Motivation:
+In reverse-incremental backups, every `sync` creates an immutable, point-in-time snapshot. Over time, taking snapshots at arbitrary frequencies (e.g., hourly, every 15 minutes, or on code save) accumulates many intermediate diff directories.
+
+The `compact` command combines multiple snapshots within a user-specified date range into a single named snapshot with **mathematically verifiable point-in-time recovery and zero data loss**.
+
+```bash
+incr-backup compact \
+    --from 2026-10-28T00:00:00+05:30 \
+    --to 2026-10-28T23:59:59+05:30 \
+    --name daily-2026-10-28
+```
+
+#### Reverse-Incremental Diff Mechanics: Which Files to Keep vs. Discard?
+
+Consider 3 files across 3 days:
+* `report.docx`: Modified multiple times each day ($V_A \to V_B \to V_C \to V_D$).
+* `budget.xlsx`: Modified once on Day 2 morning ($V_1 \to V_2$), then never again.
+* `logo.png`: Never modified ($V_L$).
+
+```text
+Day 1 (Oct 27, 23:00): day-2026-10-27 (report=VA, budget=V1, logo=VL)
+Day 2 (Oct 28):
+  - 10:00: snap-10:00 (budget modified to V2 -> diffs/snap-10:00/ receives budget.xlsx V1)
+  - 14:00: snap-14:00 (report modified to VB -> diffs/snap-14:00/ receives report.docx VA)
+  - 20:00: snap-20:00 (report modified to VC -> diffs/snap-20:00/ receives report.docx VB)
+Day 3 (Oct 29, 12:00): snap-12:00 (report modified to VD -> diffs/snap-12:00/ receives report.docx VC)
+Now: current/ contains report.docx (VD), budget.xlsx (V2), logo.png (VL)
+```
+
+When compacting Day 2 `[snap-10:00, snap-14:00, snap-20:00]` into `daily-2026-10-28`:
+1. **Manifest Selection**: The consolidated snapshot `daily-2026-10-28` adopts the **manifest of `snap-20:00`** (the anchor / newest snapshot in the range: $V_C, V_2, V_L$).
+2. **Strict Earliest-Diff Rule**:
+   - `budget.xlsx` ($V_1$ in `snap-10:00`): **KEEP**. Needed by Day 1 history! Moved to `diffs/daily-2026-10-28/budget.xlsx`.
+   - `report.docx` ($V_A$ in `snap-14:00`): **KEEP**. Needed by Day 1 history! Moved to `diffs/daily-2026-10-28/report.docx`.
+   - `report.docx` ($V_B$ in `snap-20:00`): **DISCARD**. Neither Day 1 ($V_A$) nor Day 2 anchor ($V_C$) needs intermediate edit $V_B$. Deleted to reclaim storage!
+3. **Intra-Range Created/Deleted Files**: Any file created after Day 1 and deleted before Day 2 20:00 was purely scratch data; it is purged completely.
+4. **Beginning of History**: If no snapshots exist prior to the range, all intra-range diffs are safely discarded because no older snapshots exist to reference them.
+
+#### Two-Phase Safe Compaction Protocol:
+
+To ensure network drops or crashes never cause data loss, source snapshots are purged **only after** the consolidated snapshot is fully verified and committed:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CLI as incr-backup compact
+    participant Staging as .meta/staging/<name>/
+    participant Meta as .meta/manifests/
+    participant Diffs as diffs/
+
+    CLI->>Staging: 1. Copy required diff files & stage consolidated manifest
+    CLI->>Staging: 2. Verify all staged files and manifest checksums
+    CLI->>Meta: 3. Move verified manifest to .meta/manifests/<name>.json
+    CLI->>Diffs: 4. Move staging diffs folder to diffs/<name>/
+    Note over CLI,Diffs: Consolidated snapshot is now active and valid
+    CLI->>Diffs: 5. Purge original source snapshots and their manifests
+```
+
+#### Timestamp Validation & Dry-Run Visibility:
+
+* **Explicit Timezone Validation**: `--from` and `--to` require ISO-8601 timestamps whose offset strictly matches the configured backup timezone. If UTC is passed when `local` (+05:30) is configured, the CLI aborts with:
+  `Error: Timezone offset in --from (+00:00) does not match configured backup timezone (+05:30).`
+* **Dry-Run Modes**:
+  ```bash
+  # High-level summary:
+  incr-backup compact --from <START> --to <END> --name <NAME> --dry-run --summary
+
+  # Detailed file-by-file plan:
+  incr-backup compact --from <START> --to <END> --name <NAME> --dry-run --full-list
+  ```
+* **Recursive Uniform Format**: A consolidated snapshot uses the exact same manifest format and directory layout as regular snapshots. You can compact hourly snapshots into daily snapshots, and later compact those daily snapshots into monthly snapshots.
 
 ---
 

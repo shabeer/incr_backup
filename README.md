@@ -1,7 +1,7 @@
 # incr-backup
 
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-106%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-118%20passed-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)]()
 
 > **Reverse-incremental snapshot backup orchestration for rclone cloud remotes (Google Drive, S3, etc.).**
@@ -20,6 +20,7 @@
 - 🔒 **Advisory Cloud Locking**: Prevents concurrent backup runs across machines or overlapping cron schedules, with automatic stale-lock expiration.
 - 🔍 **Manifest-Based Zero-Bandwidth Diff**: Compare any two snapshots (`diff hourly.0 daily.0`) in milliseconds without downloading file contents.
 - 🎯 **Targeted & Verified Restore**: Restore entire snapshots or specific subpaths (`--path`), with optional cryptographic verification (`--verify`).
+- 🗜️ **Dynamic Snapshot Consolidation (`compact`)**: Arbitrary snapshot frequencies and point-in-time recovery with zero data loss. Compact hourly snapshots into a single daily snapshot, or dailies into a monthly, safely discarding intermediate scratch revisions via a two-phase staging protocol.
 - 🧹 **Purge from All Snapshots (`remove` / `rm`)**: Completely purge leaked credentials, sensitive directories, or GDPR-restricted files from `current/`, all historical diffs, and all manifests in one command.
 - 🌐 **Timezone-Aware Snapshot Names**: Snapshots always embed an explicit, filesystem-safe timezone indicator: UTC (`Z`, e.g. `hourly.0__2026-10-29T04-28Z`) or local offset (`%z`, e.g. `hourly.0__2026-10-29T09-58+0530`), with zero colons (`:`) for universal cross-platform compatibility. Fully configurable via `--timezone` / `--tz`, env var, or TOML (`timezone = "local"` / `[snapshot]`).
 - ⚡ **Blazing Fast Local Parallel Scanner**: Multithreaded file traversal and MD5 checksum computation powered by `rayon` and `walkdir`.
@@ -253,6 +254,7 @@ Commands:
   restore  Restore a snapshot to a local directory (--to, --path, --verify, --overwrite)
   diff     Show differences between two snapshots (--stat, --json, --only-added, --only-modified)
   verify   Verify backup integrity (--space, --check-hashes, --deep)
+  compact  Consolidate snapshots in a date range into a single snapshot (--from, --to, --name, --summary, --full-list)
   remove   Remove a given directory or file(s) from all snapshots (alias: rm) (--path, --force, --json)
   config   Manage configuration between local file and remote metadata (push, pull, diff)
   help     Print help information
@@ -308,6 +310,7 @@ Test coverage includes:
 - **`test_locking.rs`**: Mutual exclusion, stale lock detection, and force break overrides.
 - **`test_verify.rs`**: Structural integrity, file counts, sizes, remote checksum verification, and space reports.
 - **`test_remove.rs`**: Single file and directory tree purging across current mirror and all historical diffs, manifest rewrites, dry-run mode, JSON output, and root protection.
+- **`test_compact.rs`**: Dynamic snapshot consolidation, ISO-8601 timezone offset validation, single-snapshot aliasing, intra-range create/delete lifecycle, dry-run modes (`--summary`, `--full-list`), and mathematical point-in-time restore across pre-range, consolidated, and post-range snapshots.
 - **`test_config.rs`**: Bidirectional configuration sync (`config push`, `config pull`), diff inspection (`config diff`), overwrite safety guards, retention divergence warnings in `status` and `verify`, and TOML timezone parsing (unquoted, sub-table placement, `[snapshot]`).
 
 ---
