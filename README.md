@@ -1,7 +1,7 @@
 # incr-backup
 
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-87%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-106%20passed-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)]()
 
 > **Reverse-incremental snapshot backup orchestration for rclone cloud remotes (Google Drive, S3, etc.).**
@@ -21,6 +21,7 @@
 - 🔍 **Manifest-Based Zero-Bandwidth Diff**: Compare any two snapshots (`diff hourly.0 daily.0`) in milliseconds without downloading file contents.
 - 🎯 **Targeted & Verified Restore**: Restore entire snapshots or specific subpaths (`--path`), with optional cryptographic verification (`--verify`).
 - 🧹 **Purge from All Snapshots (`remove` / `rm`)**: Completely purge leaked credentials, sensitive directories, or GDPR-restricted files from `current/`, all historical diffs, and all manifests in one command.
+- 🌐 **Timezone-Aware Snapshot Names**: Snapshots always embed an explicit, filesystem-safe timezone indicator: UTC (`Z`, e.g. `hourly.0__2026-10-29T04-28Z`) or local offset (`%z`, e.g. `hourly.0__2026-10-29T09-58+0530`), with zero colons (`:`) for universal cross-platform compatibility. Fully configurable via `--timezone` / `--tz`, env var, or TOML (`timezone = "local"` / `[snapshot]`).
 - ⚡ **Blazing Fast Local Parallel Scanner**: Multithreaded file traversal and MD5 checksum computation powered by `rayon` and `walkdir`.
 - 📦 **Single Standalone Binary**: No Python, JVM, or runtime dependencies. Just copy the 3 MB binary and run.
 
@@ -70,8 +71,12 @@ incr-backup init --adopt
 ### 2. Run Syncs
 
 ```bash
-# Run hourly sync (standard cron run)
+# Run hourly sync (standard cron run, default UTC timestamp)
 incr-backup sync --level hourly
+
+# Run sync with local timezone timestamps (e.g., hourly.0__2026-10-29T09-58+0530):
+incr-backup sync --level hourly --timezone local
+# (or shorthand: --tz local)
 
 # Force a new snapshot even if less than 30 minutes elapsed:
 incr-backup sync --level hourly --force-rotate
@@ -179,6 +184,9 @@ incr-backup config pull --to ./incr-backup.toml
 A fully documented template with all options and presets is available in [`config/incr-backup-example.toml`](./config/incr-backup-example.toml). You can create an `incr-backup.toml` file so you don't need to pass `--source` and `--remote` every time:
 
 ```toml
+# Timezone used in snapshot timestamps: "utc" (default) or "local"
+timezone = "utc"
+
 [source]
 path = "/home/user/documents"
 
@@ -228,6 +236,7 @@ Global Options:
   -r, --remote <REMOTE>     Override rclone remote path [env: INCR_BACKUP_REMOTE]
   -v, --verbose             Increase verbosity (-v, -vv, -vvv)
   -n, --dry-run             Show what would happen without making changes
+      --timezone <utc|local> Timezone for snapshot timestamps (alias: --tz) [default: utc] [env: INCR_BACKUP_TIMEZONE]
       --rclone-path <PATH>  Path to rclone binary [default: rclone]
       --rclone-flags <FLAGS> Extra flags passed to every rclone call
 ```
@@ -266,13 +275,13 @@ RUST_LOG=info cargo test -- --nocapture
 
 Test coverage includes:
 - **`test_init.rs`**: Basic init, config-based init, adopt pre-existing files, duplicate protection, nonexistent source handling.
-- **`test_sync.rs`**: Full sync pipeline, incremental diff tracking, dry-run mode, status inspection.
+- **`test_sync.rs`**: Full sync pipeline, incremental diff tracking, dry-run mode, status inspection, and timezone arguments (`--timezone local`, `--tz utc`).
 - **`test_restore.rs`**: Current restore, point-in-time restore from diffs, overwrite protection, checksum validation.
 - **`test_diff.rs`**: Added, modified, deleted file diff detection, stat summaries, and JSON serialization.
 - **`test_locking.rs`**: Mutual exclusion, stale lock detection, and force break overrides.
 - **`test_verify.rs`**: Structural integrity, file counts, sizes, remote checksum verification, and space reports.
 - **`test_remove.rs`**: Single file and directory tree purging across current mirror and all historical diffs, manifest rewrites, dry-run mode, JSON output, and root protection.
-- **`test_config.rs`**: Bidirectional configuration sync (`config push`, `config pull`), diff inspection (`config diff`), overwrite safety guards, and retention divergence warnings in `status` and `verify`.
+- **`test_config.rs`**: Bidirectional configuration sync (`config push`, `config pull`), diff inspection (`config diff`), overwrite safety guards, retention divergence warnings in `status` and `verify`, and TOML timezone parsing (unquoted, sub-table placement, `[snapshot]`).
 
 ---
 

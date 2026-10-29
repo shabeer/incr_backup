@@ -11,6 +11,16 @@
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
+# Timezone Setting for Snapshot Names
+# ------------------------------------------------------------------------------
+# Timezone used in snapshot timestamps: "utc" or "local".
+#   - "utc" (default): generates timestamps like 2026-10-29T04-28Z
+#   - "local": generates timestamps with local offset like 2026-10-29T09-58+0530
+# Can also be overridden with --timezone <utc|local> / --tz <utc|local> or INCR_BACKUP_TIMEZONE.
+timezone = "utc"
+
+
+# ------------------------------------------------------------------------------
 # [source] — Local Directory to Back Up
 # ------------------------------------------------------------------------------
 [source]
@@ -42,16 +52,6 @@ path = "/home/user/documents"
 #   Local / NAS:   path = "/Volumes/BackupDrive/myhost"
 #   SFTP:          path = "myserver:/var/backups/myhost"
 path = "gdrive:backups/myhost"
-
-
-# ------------------------------------------------------------------------------
-# Timezone Setting for Snapshot Names
-# ------------------------------------------------------------------------------
-# Timezone used in snapshot timestamps: "utc" or "local".
-#   - "utc" (default): generates timestamps like 2026-10-29T04-28Z
-#   - "local": generates timestamps with local offset like 2026-10-29T09-58+0530
-# Can also be overridden with --timezone <utc|local> / --tz <utc|local> or INCR_BACKUP_TIMEZONE.
-timezone = "utc"
 
 
 # ------------------------------------------------------------------------------

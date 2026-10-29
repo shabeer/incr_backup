@@ -1170,6 +1170,32 @@
 
 ---
 
+### TC-CONF-007 — Timezone-aware snapshot naming via CLI and config
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-CONF-007 |
+| **Test Name**    | Timezone indicator in snapshot directory names (UTC vs Local) |
+| **Preconditions** | Initialized backup repository. |
+| **Steps**        | 1. Run `incr-backup sync --level hourly --timezone local` <br>2. Run `incr-backup sync --level hourly --tz utc --force-rotate` |
+| **Expected Result** | - Step 1 creates snapshot ending with numeric offset `+HHMM` or `-HHMM` without colons `:` <br>- Step 2 creates snapshot ending with `Z` (UTC designator). |
+| **Category**     | integration |
+
+---
+
+### TC-CONF-008 — Robust TOML timezone parsing across sections and unquoted values
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-CONF-008 |
+| **Test Name**    | TOML configuration timezone parsing flexibility |
+| **Preconditions** | Valid source directory and remote path. |
+| **Steps**        | 1. Test `timezone = "local"` at root level. <br>2. Test `timezone = "local"` after `[remote]` or `[retention]` table headers. <br>3. Test `[snapshot]` section with `timezone = "local"`. <br>4. Test unquoted `timezone = local` and `timezone=local`. |
+| **Expected Result** | - In all cases, `Config::load` parses `timezone` as `SnapshotTimezone::Local` without failing TOML syntax validation or defaulting to UTC. |
+| **Category**     | unit, integration |
+
+---
+
 ## 14. Filesystem Edge Cases
 
 ### TC-FS-001 — Files with spaces in names
@@ -1599,13 +1625,13 @@
 | 10. Locking & Concurrency | TC-LOCK-001 – TC-LOCK-005 | 5 |
 | 11. Journal & Resumability | TC-JOUR-001 – TC-JOUR-005 | 5 |
 | 12. Error Handling | TC-ERR-001 – TC-ERR-008 | 8 |
-| 13. Configuration & Env | TC-CONF-001 – TC-CONF-006 | 6 |
+| 13. Configuration & Env | TC-CONF-001 – TC-CONF-008 | 8 |
 | 14. Filesystem Edge Cases | TC-FS-001 – TC-FS-011 | 11 |
 | 15. Network & Remote | TC-NET-001 – TC-NET-005 | 5 |
 | 16. Multi-Source & Namespace | TC-NS-001 – TC-NS-004 | 4 |
 | 17. `remove` Command | TC-REM-001 – TC-REM-006 | 6 |
 | 18. `config` Command | TC-CFG-001 – TC-CFG-005 | 5 |
-| **Total** | | **112** |
+| **Total** | | **114** |
 
 ---
 

@@ -211,26 +211,57 @@ pub struct ExcludeConfig {
 // nested structs — like Python's configparser sections or Java Properties groups.
 
 /// Intermediate struct for serializing and deserializing the `[source]` TOML section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct TomlSource {
-    path: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    timezone: Option<SnapshotTimezone>,
 }
 
 /// Intermediate struct for serializing and deserializing the `[remote]` TOML section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct TomlRemote {
-    path: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    timezone: Option<SnapshotTimezone>,
+}
+
+/// Intermediate struct for serializing and deserializing the `[snapshot]` TOML section.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TomlSnapshot {
+    #[serde(default)]
+    timezone: Option<SnapshotTimezone>,
 }
 
 /// Timezone setting for snapshot timestamp formatting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum SnapshotTimezone {
     /// Coordinated Universal Time with 'Z' suffix (e.g., `2026-10-29T04-28Z`).
     #[default]
     Utc,
     /// Local machine timezone with numeric offset (e.g., `2026-10-29T09-58+0530`).
     Local,
+}
+
+impl Serialize for SnapshotTimezone {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for SnapshotTimezone {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<SnapshotTimezone>().map_err(serde::de::Error::custom)
+    }
 }
 
 impl SnapshotTimezone {
@@ -285,6 +316,7 @@ struct TomlConfig {
     retention: Option<RetentionConfig>,
     rclone: Option<RcloneConfig>,
     exclude: Option<ExcludeConfig>,
+    snapshot: Option<TomlSnapshot>,
     #[serde(default)]
     timezone: Option<SnapshotTimezone>,
 }
@@ -369,7 +401,99 @@ pub struct Config {
     pub timezone: SnapshotTimezone,
 }
 
+/// Preprocess a TOML string to ensure robust timezone configuration handling.
+///
+/// Handles:
+/// - Unquoted timezone values: `timezone = local`, `timezone=local`, `timezone = utc`, `timezone=utc`
+/// - Timezone declared anywhere in the file (e.g. after `[remote]` or `[source]`)
+///   by hoisting it to the root table if not inside a dedicated `[snapshot]` table.
+pub fn preprocess_toml(content: &str) -> String {
+    let mut hoisted_timezone: Option<String> = None;
+    let mut filtered_lines = Vec::new();
+    let mut in_snapshot_section = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Check for section headers
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let section = trimmed[1..trimmed.len() - 1].trim().to_ascii_lowercase();
+            in_snapshot_section = section == "snapshot";
+            filtered_lines.push(line.to_string());
+            continue;
+        }
+
+        // Ignore comments
+        if trimmed.starts_with('#') {
+            filtered_lines.push(line.to_string());
+            continue;
+        }
+
+        // Check if line sets timezone
+        // Matches "timezone = ...", "timezone=...", "timezone: ..."
+        if let Some(rest) = trimmed.strip_prefix("timezone") {
+            let rest = rest.trim_start();
+            if let Some(val_str) = rest.strip_prefix('=').or_else(|| rest.strip_prefix(':')) {
+                let val_no_comment = val_str.split('#').next().unwrap_or("").trim();
+                let raw_val = val_no_comment.trim_matches('"').trim_matches('\'').trim();
+                let lower = raw_val.to_ascii_lowercase();
+                if lower == "local" || lower == "utc" || lower == "z" || lower == "gmt" {
+                    let formatted = format!("timezone = \"{}\"", lower);
+                    if in_snapshot_section {
+                        filtered_lines.push(formatted);
+                    } else {
+                        hoisted_timezone = Some(formatted);
+                        // Blank out the line in the sub-table so TOML parser doesn't bind to sub-table
+                        filtered_lines.push(String::new());
+                    }
+                    continue;
+                }
+            }
+        }
+
+        filtered_lines.push(line.to_string());
+    }
+
+    if let Some(tz_line) = hoisted_timezone {
+        format!("{}\n{}", tz_line, filtered_lines.join("\n"))
+    } else {
+        filtered_lines.join("\n")
+    }
+}
+
 impl Config {
+    /// Load configuration from a TOML string.
+    ///
+    /// Useful for loading configuration directly from text or in-memory fixtures.
+    pub fn from_toml_str(content: &str) -> Result<Self> {
+        let preprocessed = preprocess_toml(content);
+        let toml_config: TomlConfig = toml::from_str(&preprocessed)?;
+
+        let timezone = toml_config
+            .timezone
+            .or_else(|| toml_config.snapshot.as_ref().and_then(|s| s.timezone))
+            .or_else(|| toml_config.remote.as_ref().and_then(|r| r.timezone))
+            .or_else(|| toml_config.source.as_ref().and_then(|s| s.timezone))
+            .unwrap_or_default();
+
+        Ok(Config {
+            source_path: toml_config
+                .source
+                .and_then(|s| s.path)
+                .unwrap_or_default(),
+            remote_path: toml_config
+                .remote
+                .and_then(|r| r.path)
+                .unwrap_or_default(),
+            retention: toml_config.retention.unwrap_or_default(),
+            rclone: toml_config.rclone.unwrap_or_default(),
+            exclude: toml_config.exclude.unwrap_or_default(),
+            verbose: 0,
+            dry_run: false,
+            timezone,
+        })
+    }
+
     /// Load configuration from a TOML file.
     ///
     /// Reads and parses the file at `path`. Missing optional sections
@@ -385,37 +509,11 @@ impl Config {
     /// let config = Config::load(Path::new("incr-backup.toml"))?;
     /// ```
     pub fn load(path: &Path) -> Result<Self> {
-        // `std::fs::read_to_string` reads the entire file into a String.
-        // `map_err` converts the IO error into our custom error type —
-        // like Java's catch(IOException e) { throw new ConfigException(...); }
         let content = std::fs::read_to_string(path).map_err(|e| {
             IncrError::Config(format!("cannot read config file '{}': {}", path.display(), e))
         })?;
 
-        // `toml::from_str` deserializes TOML into our TomlConfig struct.
-        // The `?` operator propagates any parse error as IncrError::Toml
-        // (thanks to the `#[from]` attribute in error.rs).
-        let toml_config: TomlConfig = toml::from_str(&content)?;
-
-        // Convert the TOML-specific struct into our main Config.
-        // `unwrap_or_default()` = Python's `dict.get(key, default_value)` —
-        // use the parsed value if present, otherwise the Default impl.
-        Ok(Config {
-            source_path: toml_config
-                .source
-                .map(|s| s.path)
-                .unwrap_or_default(),
-            remote_path: toml_config
-                .remote
-                .map(|r| r.path)
-                .unwrap_or_default(),
-            retention: toml_config.retention.unwrap_or_default(),
-            rclone: toml_config.rclone.unwrap_or_default(),
-            exclude: toml_config.exclude.unwrap_or_default(),
-            verbose: 0,
-            dry_run: false,
-            timezone: toml_config.timezone.unwrap_or_default(),
-        })
+        Self::from_toml_str(&content)
     }
 
     /// Create a default configuration (no TOML file).
@@ -595,14 +693,16 @@ impl Config {
                 None
             } else {
                 Some(TomlSource {
-                    path: self.source_path.clone(),
+                    path: Some(self.source_path.clone()),
+                    timezone: None,
                 })
             },
             remote: if self.remote_path.is_empty() {
                 None
             } else {
                 Some(TomlRemote {
-                    path: self.remote_path.clone(),
+                    path: Some(self.remote_path.clone()),
+                    timezone: None,
                 })
             },
             retention: Some(self.retention.clone()),
@@ -612,6 +712,7 @@ impl Config {
             } else {
                 Some(self.exclude.clone())
             },
+            snapshot: None,
             timezone: Some(self.timezone),
         };
 
@@ -1112,5 +1213,44 @@ path = "gdrive:original"
         assert_eq!(config.retention.monthly, 6);
         assert_eq!(config.retention.min_interval_minutes, 30);
         assert!(config.exclude.patterns.contains(&"*.tmp".to_string()));
+        assert_eq!(config.timezone, SnapshotTimezone::Utc);
+    }
+
+    #[test]
+    fn test_timezone_toml_parsing_variations() {
+        // 1. Root level quoted
+        let toml1 = "timezone = \"local\"\n[source]\npath = \"/tmp\"\n[remote]\npath = \"gdrive:bak\"\n";
+        let cfg1 = Config::from_toml_str(toml1).unwrap();
+        assert_eq!(cfg1.timezone, SnapshotTimezone::Local);
+
+        // 2. Placed after [remote] (sub-table placement)
+        let toml2 = "[source]\npath = \"/tmp\"\n[remote]\npath = \"gdrive:bak\"\ntimezone = \"local\"\n";
+        let cfg2 = Config::from_toml_str(toml2).unwrap();
+        assert_eq!(cfg2.timezone, SnapshotTimezone::Local);
+
+        // 3. Dedicated [snapshot] section
+        let toml3 = "[source]\npath = \"/tmp\"\n[remote]\npath = \"gdrive:bak\"\n[snapshot]\ntimezone = \"local\"\n";
+        let cfg3 = Config::from_toml_str(toml3).unwrap();
+        assert_eq!(cfg3.timezone, SnapshotTimezone::Local);
+
+        // 4. Unquoted bare value: timezone = local
+        let toml4 = "[source]\npath = \"/tmp\"\n[remote]\npath = \"gdrive:bak\"\ntimezone = local\n";
+        let cfg4 = Config::from_toml_str(toml4).unwrap();
+        assert_eq!(cfg4.timezone, SnapshotTimezone::Local);
+
+        // 5. Unquoted without spaces: timezone=local
+        let toml5 = "[source]\npath = \"/tmp\"\n[remote]\npath = \"gdrive:bak\"\ntimezone=local\n";
+        let cfg5 = Config::from_toml_str(toml5).unwrap();
+        assert_eq!(cfg5.timezone, SnapshotTimezone::Local);
+
+        // 6. Case variations and inline comments
+        let toml6 = "timezone = \"Local\" # inline comment\n[source]\npath = \"/tmp\"\n[remote]\npath = \"gdrive:bak\"\n";
+        let cfg6 = Config::from_toml_str(toml6).unwrap();
+        assert_eq!(cfg6.timezone, SnapshotTimezone::Local);
+
+        // 7. Explicit UTC
+        let toml7 = "timezone=utc\n[source]\npath = \"/tmp\"\n[remote]\npath = \"gdrive:bak\"\n";
+        let cfg7 = Config::from_toml_str(toml7).unwrap();
+        assert_eq!(cfg7.timezone, SnapshotTimezone::Utc);
     }
 }

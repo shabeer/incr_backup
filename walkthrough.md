@@ -43,10 +43,10 @@ flowchart LR
     subgraph "Remote: gdrive:backup/myhost/"
         CUR["current/<br/><b>Always the latest full state</b><br/>Directly browseable on Google Drive"]
         subgraph "diffs/"
-            D0["hourly.0__2026-10-28T08-00/<br/>Old versions from latest sync"]
-            D1["hourly.1__2026-10-28T07-00/"]
-            D2["daily.0__2026-10-27/"]
-            D3["weekly.0__2026-W43/"]
+            D0["hourly.0__2026-10-28T08-00Z/<br/>Old versions from latest sync"]
+            D1["hourly.1__2026-10-28T07-00Z/"]
+            D2["daily.0__2026-10-27T00-00Z/"]
+            D3["weekly.0__2026-10-25T00-00Z/"]
         end
         META[".meta/<br/>config.json<br/>journal.json<br/>lock<br/>manifests/"]
     end
@@ -79,15 +79,15 @@ gdrive:backup/myhost/
 │       └── main.rs
 │
 ├── diffs/                               👈 Old versions of changed/deleted files
-│   ├── hourly.0__2026-10-28T08-00/      👈 Changes from most recent sync
+│   ├── hourly.0__2026-10-28T08-00Z/     👈 Changes from most recent sync (or +0530 in local mode)
 │   │   └── documents/
 │   │       └── report.pdf               (previous version before 8:00 AM edit)
-│   ├── hourly.1__2026-10-28T07-00/
-│   ├── daily.0__2026-10-27/
+│   ├── hourly.1__2026-10-28T07-00Z/
+│   ├── daily.0__2026-10-27T00-00Z/
 │   │   └── photos/
 │   │       └── deleted-photo.jpg        (deleted from source, safely preserved)
-│   ├── weekly.0__2026-W43/
-│   └── monthly.0__2026-09/
+│   ├── weekly.0__2026-10-25T00-00Z/
+│   └── monthly.0__2026-09-01T00-00Z/
 │
 └── .meta/
     ├── config.json                      👈 Remote backup configuration & retention
@@ -245,6 +245,17 @@ If `hourly.0` was created less than `min_interval_minutes` (default: 30 minutes)
   ```bash
   incr-backup sync --level hourly --force-rotate
   ```
+
+#### 3. Timezone in Snapshot Names:
+Every snapshot name embeds an unambiguous, filesystem-safe timestamp (no colons `:`). You can control whether timestamps reflect UTC or local time:
+- **`--timezone utc` (default)**: Appends `Z` (e.g. `hourly.0__2026-10-29T04-28Z`). Canonical for cloud and multi-machine environments.
+- **`--timezone local` (or `--tz local`)**: Embeds the local numeric offset (e.g. `hourly.0__2026-10-29T09-58+0530`), matching your local wall-clock cron schedule.
+- Can also be set via `INCR_BACKUP_TIMEZONE` or `timezone = "local"` (or `[snapshot] timezone = "local"`) in `incr-backup.toml`.
+
+```bash
+# Sync with local timezone snapshot naming
+incr-backup sync --level hourly --timezone local
+```
 
 ---
 

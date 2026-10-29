@@ -42,11 +42,11 @@ flowchart LR
     subgraph "GDrive Remote: remote:backup/myhost/"
         CUR["current/<br/>Always the latest<br/>full state<br/><b>Directly browseable</b>"]
         subgraph "diffs/"
-            D0["hourly.0__2026-10-27T22-00/<br/>Old versions of files<br/>changed in latest sync"]
-            D1["hourly.1__2026-10-27T21-00/"]
-            D2["daily.0__2026-10-27/"]
-            D3["weekly.0__2026-W44/"]
-            D4["monthly.0__2026-10/"]
+            D0["hourly.0__2026-10-27T22-00Z/<br/>Old versions of files<br/>changed in latest sync"]
+            D1["hourly.1__2026-10-27T21-00Z/"]
+            D2["daily.0__2026-10-27T00-00Z/"]
+            D3["weekly.0__2026-10-25T00-00Z/"]
+            D4["monthly.0__2026-10-01T00-00Z/"]
         end
         META[".meta/<br/>config.json<br/>journal.json<br/>lock<br/>manifests/"]
     end
@@ -847,15 +847,15 @@ gdrive:backup/myhost/                    ← remote base path (configurable)
 │       └── main.rs
 │
 ├── diffs/                               ← Old versions of changed/deleted files
-│   ├── hourly.0__2026-10-27T22-00/      ← Timestamp in name (: → -)
+│   ├── hourly.0__2026-10-27T22-00Z/     ← Timestamp in name (: → -, with timezone: Z or +0530)
 │   │   └── documents/
 │   │       └── report.pdf               ← Previous version
-│   ├── hourly.1__2026-10-27T21-00/
-│   ├── daily.0__2026-10-27/
+│   ├── hourly.1__2026-10-27T21-00Z/
+│   ├── daily.0__2026-10-27T00-00Z/
 │   │   └── photos/
 │   │       └── deleted-photo.jpg        ← Deleted from source; preserved
-│   ├── weekly.0__2026-W43/
-│   └── monthly.0__2026-09/
+│   ├── weekly.0__2026-10-25T00-00Z/
+│   └── monthly.0__2026-09-01T00-00Z/
 │
 └── .meta/
     ├── config.json                      ← Backup configuration

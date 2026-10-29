@@ -123,3 +123,78 @@ min_interval_minutes = 30
     assert!(pulled_content.contains("hourly = 3"));
     assert!(pulled_content.contains("daily = 3"));
 }
+
+#[test]
+fn test_config_file_with_timezone_local() {
+    let env = TestEnv::new();
+    env.write_source_file("file1.txt", b"Testing timezone in config");
+
+    // Config file with timezone = local placed after [remote] (the common pattern)
+    let cfg_path = env.temp_dir.path().join("local-tz-config.toml");
+    let toml = format!(
+        r#"[source]
+path = "{}"
+
+[remote]
+path = "{}"
+
+timezone = local
+"#,
+        env.source_str(),
+        env.remote_str()
+    );
+    std::fs::write(&cfg_path, &toml).unwrap();
+
+    // Init with this config
+    env.command()
+        .args(["-c", cfg_path.to_str().unwrap(), "init"])
+        .assert()
+        .success();
+
+    // First sync
+    env.command()
+        .args([
+            "-c",
+            cfg_path.to_str().unwrap(),
+            "sync",
+            "--level",
+            "hourly",
+            "--force-rotate",
+        ])
+        .assert()
+        .success();
+
+    // Modify source and sync again to trigger a historical diff snapshot
+    env.write_source_file("file1.txt", b"Modified for snapshot");
+    env.command()
+        .args([
+            "-c",
+            cfg_path.to_str().unwrap(),
+            "sync",
+            "--level",
+            "hourly",
+            "--force-rotate",
+        ])
+        .assert()
+        .success();
+
+    let diff_entries = std::fs::read_dir(env.remote_path.join("diffs")).unwrap();
+    let diff_dirs: Vec<String> = diff_entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+
+    assert!(!diff_dirs.is_empty(), "expected snapshot in diffs/");
+    for snap in &diff_dirs {
+        assert!(
+            snap.contains('+') || snap.contains('-'),
+            "Snapshot {} should use local timezone offset, not UTC",
+            snap
+        );
+        assert!(
+            !snap.ends_with('Z'),
+            "Snapshot {} should not end with Z when timezone=local",
+            snap
+        );
+    }
+}

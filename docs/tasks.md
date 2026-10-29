@@ -56,9 +56,9 @@
 | 28 | `test_config.rs` Integration Tests | ✅ Done | 1/1 integration tests passing (push, pull, diff, mismatch warning, overwrite guard) |
 | 29 | Release Build | ✅ Done | Optimized standalone binary produced at `target/release/incr-backup` (3.1 MB) |
 | 30 | Documentation | ✅ Done | Updated all markdown files (`README.md`, `walkthrough.md`, `TEST_CASES.md`, `tasks.md`, `IMPLEMENTATION_PLAN.md`) |
-| 31 | Total Test Count | ✅ Done | **102 passed / 0 failed** across all test suites (77 unit + 25 integration) |
-| 32 | Timezone in Snapshot Names | ✅ Done | Always use timezone (`Z` for UTC, `%z` for local), `--timezone`/`--tz` CLI flag, `INCR_BACKUP_TIMEZONE` env var, and `timezone` in config TOML |
+| 31 | Total Test Count | ✅ Done | **106 passed / 0 failed** across all test suites (80 unit + 26 integration) |
+| 32 | Timezone in Snapshot Names & TOML Fix | ✅ Done | Timezone in snapshots (`Z` for UTC, `%z` for local), `--timezone`/`--tz` CLI flag, `INCR_BACKUP_TIMEZONE` env var, multi-location TOML parsing (`[snapshot]`, sub-tables, root), and unquoted value support (`timezone=local`) |
 
 ---
 
-*Last updated: 2026-10-29T10:08+05:30*
+*Last updated: 2026-10-29T10:47+05:30*
