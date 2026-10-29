@@ -92,7 +92,7 @@ pub fn run_verify(config: &Config, rclone: &Rclone, options: &VerifyOptions) -> 
     checks.push(check_retention_compliance(rclone, remote_base, config));
 
     // ── Check 8: Lock state ─────────────────────────────────────────────
-    checks.push(check_lock_state(rclone, remote_base));
+    checks.push(check_lock_state(rclone, remote_base, config.timezone));
 
     // ── Check 9: Diff directory existence ────────────────────────────────
     checks.push(check_diff_dirs(rclone, remote_base));
@@ -463,7 +463,11 @@ fn check_retention_compliance(rclone: &Rclone, remote_base: &str, config: &Confi
     }
 }
 
-fn check_lock_state(rclone: &Rclone, remote_base: &str) -> VerifyCheck {
+fn check_lock_state(
+    rclone: &Rclone,
+    remote_base: &str,
+    timezone: crate::config::SnapshotTimezone,
+) -> VerifyCheck {
     let path = format!("{}/.meta/lock", remote_base);
     match rclone.cat(&path) {
         Ok(contents) => {
@@ -476,7 +480,8 @@ fn check_lock_state(rclone: &Rclone, remote_base: &str) -> VerifyCheck {
                             name: "No stale lock".to_string(),
                             status: CheckStatus::Warning(format!(
                                 "stale lock from '{}' since {}",
-                                lock.holder, lock.started_at
+                                lock.holder,
+                                timezone.format_message_datetime(lock.started_at)
                             )),
                             details: String::new(),
                         }
@@ -486,7 +491,8 @@ fn check_lock_state(rclone: &Rclone, remote_base: &str) -> VerifyCheck {
                             name: "No stale lock".to_string(),
                             status: CheckStatus::Warning(format!(
                                 "active lock from '{}' since {}",
-                                lock.holder, lock.started_at
+                                lock.holder,
+                                timezone.format_message_datetime(lock.started_at)
                             )),
                             details: String::new(),
                         }

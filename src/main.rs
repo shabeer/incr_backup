@@ -244,6 +244,27 @@ enum ConfigAction {
 fn main() {
     let cli = Cli::parse();
 
+    // Early timezone detection so log timestamps use the configured timezone immediately
+    let detected_tz = cli
+        .timezone
+        .or_else(|| {
+            std::env::var("INCR_BACKUP_TIMEZONE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .or_else(|| {
+            if cli.config.exists() {
+                std::fs::read_to_string(&cli.config)
+                    .ok()
+                    .and_then(|c| Config::from_toml_str(&c).ok())
+                    .map(|c| c.timezone)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+    incr_backup::config::set_configured_timezone(detected_tz);
+
     // Initialize logging based on verbosity
     let log_level = match cli.verbose {
         0 => "warn",
@@ -251,10 +272,23 @@ fn main() {
         2 => "debug",
         _ => "trace",
     };
-    env_logger::Builder::from_env(
+    let mut builder = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(log_level),
-    )
-    .init();
+    );
+    builder.format(|buf, record| {
+        use std::io::Write;
+        let ts = incr_backup::config::get_configured_timezone().format_log_timestamp();
+        let style = buf.default_level_style(record.level());
+        writeln!(
+            buf,
+            "[{} {style}{:5}{style:#} {}] {}",
+            ts,
+            record.level(),
+            record.target(),
+            record.args()
+        )
+    });
+    builder.init();
 
     // Execute the command
     if let Err(e) = run_command(cli) {
@@ -363,7 +397,9 @@ fn load_config(cli: &Cli) -> incr_backup::error::Result<Config> {
         timezone: cli.timezone,
     };
 
-    Ok(config.with_overrides(&overrides))
+    let config = config.with_overrides(&overrides);
+    incr_backup::config::set_configured_timezone(config.timezone);
+    Ok(config)
 }
 
 // ── Command Implementations ─────────────────────────────────────────────────
@@ -548,7 +584,7 @@ fn cmd_sync(
     let retention = &config.retention;
     let remote_base = &config.remote_path;
 
-    let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base);
+    let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base, config.timezone);
     let journal_mgr = incr_backup::journal::JournalManager::new(&rclone, remote_base);
     let rotation_mgr = RotationManager::new(&rclone, remote_base, retention);
 
@@ -556,7 +592,10 @@ fn cmd_sync(
 
     // Check for existing journal
     if let Some(journal) = journal_mgr.load_journal()? {
-        println!("Found interrupted operation from {}. Resuming...", journal.started_at);
+        println!(
+            "Found interrupted operation from {}. Resuming...",
+            config.timezone.format_message_datetime(journal.started_at)
+        );
     }
 
     // Acquire lock
@@ -765,7 +804,7 @@ fn cmd_status(config: Config) -> incr_backup::error::Result<()> {
     }
 
     // Check lock
-    let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base);
+    let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base, config.timezone);
     match lock_mgr.check()? {
         Some(lock) => {
             let stale = if incr_backup::lock::is_stale(&lock) {
@@ -773,7 +812,13 @@ fn cmd_status(config: Config) -> incr_backup::error::Result<()> {
             } else {
                 ""
             };
-            println!("Lock:       {} (pid {}, since {}){}", lock.holder, lock.pid, lock.started_at, stale);
+            println!(
+                "Lock:       {} (pid {}, since {}){}",
+                lock.holder,
+                lock.pid,
+                config.timezone.format_message_datetime(lock.started_at),
+                stale
+            );
         }
         None => println!("Lock:       (none)"),
     }
@@ -1012,7 +1057,7 @@ fn cmd_config_push(
     let meta_path = format!("{}/.meta/config.json", remote_base);
 
     // Acquire lock
-    let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base);
+    let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base, config.timezone);
     if !dry_run {
         lock_mgr.acquire(force)?;
     }

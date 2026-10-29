@@ -55,3 +55,56 @@ fn test_lock_prevents_concurrent_sync() {
         .success();
 }
 
+#[test]
+fn test_lock_error_respects_timezone() {
+    let env = TestEnv::new();
+    env.write_source_file("file.txt", b"content");
+
+    let lock_json = serde_json::json!({
+        "holder": "shabeer-mac.local",
+        "pid": 99999,
+        "started_at": "2026-10-29T06:30:05.775308Z",
+        "timeout_minutes": 60
+    });
+    let meta_dir = env.remote_path.join(".meta");
+    std::fs::create_dir_all(&meta_dir).unwrap();
+    std::fs::write(meta_dir.join("lock"), serde_json::to_string(&lock_json).unwrap()).unwrap();
+
+    // With UTC timezone
+    env.command()
+        .args([
+            "sync",
+            "--level",
+            "hourly",
+            "--source",
+            &env.source_str(),
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("2026-10-29T06:30:05.775308+00:00"));
+
+    // With local timezone
+    let dt = chrono::DateTime::parse_from_rfc3339("2026-10-29T06:30:05.775308Z").unwrap();
+    let local_expected = dt.with_timezone(&chrono::Local).to_rfc3339();
+
+    env.command()
+        .args([
+            "sync",
+            "--level",
+            "hourly",
+            "--source",
+            &env.source_str(),
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "local",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(local_expected));
+}
+

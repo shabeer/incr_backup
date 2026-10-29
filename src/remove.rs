@@ -204,7 +204,7 @@ pub fn run_remove(
     );
 
     // Step 2: Acquire advisory cloud lock
-    let lock_mgr = LockManager::new(rclone, &config.remote_path);
+    let lock_mgr = LockManager::new(rclone, &config.remote_path, config.timezone);
     if options.dry_run {
         info!("[DRY-RUN] Would acquire remote lock");
     } else {

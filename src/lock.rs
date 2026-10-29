@@ -25,6 +25,7 @@ use chrono::{DateTime, Utc};
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
+use crate::config::SnapshotTimezone;
 use crate::error::{IncrError, Result};
 use crate::rclone::Rclone;
 
@@ -90,7 +91,7 @@ impl LockInfo {
 ///
 /// ## Usage
 /// ```rust,ignore
-/// let lock_mgr = LockManager::new(&rclone, "remote:backup/myhost");
+/// let lock_mgr = LockManager::new(&rclone, "remote:backup/myhost", SnapshotTimezone::default());
 /// lock_mgr.acquire(false)?;   // Fails if another process holds the lock
 /// // ... do backup work ...
 /// lock_mgr.release()?;        // Always release when done
@@ -109,6 +110,9 @@ pub struct LockManager<'a> {
     /// Base path on the remote, e.g. "remote:backup/myhost".
     /// The lock file lives at `{remote_base}/.meta/lock`.
     remote_base: String,
+
+    /// Timezone for formatting lock timestamps in log and error messages.
+    timezone: SnapshotTimezone,
 }
 
 impl<'a> LockManager<'a> {
@@ -117,10 +121,16 @@ impl<'a> LockManager<'a> {
     /// # Arguments
     /// * `rclone` — Reference to the rclone subprocess wrapper
     /// * `remote_base` — Remote base path, e.g. `"gdrive:backup/myhost"`
-    pub fn new(rclone: &'a Rclone, remote_base: impl Into<String>) -> Self {
+    /// * `timezone` — Timezone setting for timestamp messages
+    pub fn new(
+        rclone: &'a Rclone,
+        remote_base: impl Into<String>,
+        timezone: SnapshotTimezone,
+    ) -> Self {
         Self {
             rclone,
             remote_base: remote_base.into(),
+            timezone,
         }
     }
 
@@ -163,7 +173,9 @@ impl<'a> LockManager<'a> {
                     // --force flag: break lock unconditionally.
                     warn!(
                         "Force-breaking lock held by '{}' (PID {}) since {}",
-                        existing.holder, existing.pid, existing.started_at
+                        existing.holder,
+                        existing.pid,
+                        self.timezone.format_message_datetime(existing.started_at)
                     );
                     self.write_lock()?;
                     Ok(())
@@ -173,7 +185,7 @@ impl<'a> LockManager<'a> {
                         "Breaking stale lock held by '{}' (PID {}) since {} ({} minutes old, timeout is {} minutes)",
                         existing.holder,
                         existing.pid,
-                        existing.started_at,
+                        self.timezone.format_message_datetime(existing.started_at),
                         stale_minutes(&existing),
                         existing.timeout_minutes
                     );
@@ -183,7 +195,7 @@ impl<'a> LockManager<'a> {
                     // Lock is fresh — another backup is actually running.
                     Err(IncrError::Locked {
                         holder: existing.holder,
-                        since: existing.started_at.to_rfc3339(),
+                        since: self.timezone.format_rfc3339(existing.started_at),
                     })
                 }
             }
@@ -273,7 +285,9 @@ impl<'a> LockManager<'a> {
 
         info!(
             "Writing lock: holder={}, pid={}, started_at={}",
-            lock_info.holder, lock_info.pid, lock_info.started_at
+            lock_info.holder,
+            lock_info.pid,
+            self.timezone.format_message_datetime(lock_info.started_at)
         );
 
         self.rclone.rcat(&lock_path, &json)?;

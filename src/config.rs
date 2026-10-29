@@ -289,6 +289,52 @@ impl SnapshotTimezone {
     pub fn now_formatted(&self) -> String {
         self.format_datetime(Utc::now())
     }
+
+    /// Format a log timestamp (seconds precision) according to this timezone setting.
+    pub fn format_log_timestamp(&self) -> String {
+        match self {
+            SnapshotTimezone::Utc => Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            SnapshotTimezone::Local => Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
+        }
+    }
+
+    /// Format a UTC DateTime for log/console messages with full microsecond precision according to this timezone setting.
+    pub fn format_message_datetime(&self, dt: DateTime<Utc>) -> String {
+        match self {
+            SnapshotTimezone::Utc => dt.to_string(),
+            SnapshotTimezone::Local => dt.with_timezone(&Local).to_string(),
+        }
+    }
+
+    /// Format a UTC DateTime in RFC3339 format according to this timezone setting.
+    pub fn format_rfc3339(&self, dt: DateTime<Utc>) -> String {
+        match self {
+            SnapshotTimezone::Utc => dt.to_rfc3339(),
+            SnapshotTimezone::Local => dt.with_timezone(&Local).to_rfc3339(),
+        }
+    }
+}
+
+static CURRENT_TIMEZONE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+const TZ_UTC: u8 = 0;
+const TZ_LOCAL: u8 = 1;
+
+/// Get the currently configured timezone for timestamps across the application.
+pub fn get_configured_timezone() -> SnapshotTimezone {
+    match CURRENT_TIMEZONE.load(std::sync::atomic::Ordering::Relaxed) {
+        TZ_LOCAL => SnapshotTimezone::Local,
+        _ => SnapshotTimezone::Utc,
+    }
+}
+
+/// Set the configured timezone for timestamps across the application.
+pub fn set_configured_timezone(tz: SnapshotTimezone) {
+    let val = match tz {
+        SnapshotTimezone::Utc => TZ_UTC,
+        SnapshotTimezone::Local => TZ_LOCAL,
+    };
+    CURRENT_TIMEZONE.store(val, std::sync::atomic::Ordering::Relaxed);
 }
 
 impl std::str::FromStr for SnapshotTimezone {
@@ -486,6 +532,8 @@ impl Config {
             .or_else(|| toml_config.source.as_ref().and_then(|s| s.timezone))
             .unwrap_or_default();
 
+        set_configured_timezone(timezone);
+
         Ok(Config {
             source_path: toml_config
                 .source
@@ -613,6 +661,7 @@ impl Config {
         {
             self.timezone = tz;
         }
+        set_configured_timezone(self.timezone);
 
         self
     }
@@ -1201,6 +1250,41 @@ path = "gdrive:original"
         let local_display = SnapshotTimezone::Local.format_display_datetime(now_utc);
         assert!(local_display.contains(':')); // Colons for time and offset
         assert!(local_display.contains('+') || local_display.contains('-'));
+
+        // Log timestamp formatting
+        let utc_log = SnapshotTimezone::Utc.format_log_timestamp();
+        assert!(utc_log.ends_with('Z'));
+        assert!(utc_log.contains('T'));
+
+        let local_log = SnapshotTimezone::Local.format_log_timestamp();
+        assert!(local_log.contains('+') || local_log.contains('-'));
+        assert!(local_log.contains(':'));
+
+        // Message datetime formatting
+        let dt = chrono::DateTime::parse_from_rfc3339("2026-10-29T06:30:05.775308Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let utc_msg = SnapshotTimezone::Utc.format_message_datetime(dt);
+        assert_eq!(utc_msg, "2026-10-29 06:30:05.775308 UTC");
+
+        let local_msg = SnapshotTimezone::Local.format_message_datetime(dt);
+        assert!(local_msg.contains("2026-10-29"));
+        assert!(local_msg.contains('+') || local_msg.contains('-'));
+        assert!(!local_msg.contains("UTC"));
+
+        // RFC3339 formatting
+        let utc_rfc = SnapshotTimezone::Utc.format_rfc3339(dt);
+        assert!(utc_rfc.ends_with("+00:00") || utc_rfc.ends_with('Z'));
+
+        let local_rfc = SnapshotTimezone::Local.format_rfc3339(dt);
+        assert!(local_rfc.contains('+') || local_rfc.contains('-'));
+        assert_ne!(local_rfc, utc_rfc);
+
+        // Global timezone getter and setter
+        set_configured_timezone(SnapshotTimezone::Utc);
+        assert_eq!(get_configured_timezone(), SnapshotTimezone::Utc);
+        set_configured_timezone(SnapshotTimezone::Local);
+        assert_eq!(get_configured_timezone(), SnapshotTimezone::Local);
     }
 
     #[test]

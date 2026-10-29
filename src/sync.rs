@@ -131,7 +131,7 @@ impl<'a> SyncPipeline<'a> {
     /// ```
     pub fn new(config: &'a Config, rclone: &'a Rclone) -> Self {
         let rotation_mgr = RotationManager::new(rclone, &config.remote_path, &config.retention);
-        let lock_mgr = LockManager::new(rclone, &config.remote_path);
+        let lock_mgr = LockManager::new(rclone, &config.remote_path, config.timezone);
         let journal_mgr = JournalManager::new(rclone, &config.remote_path);
 
         Self {
@@ -180,7 +180,7 @@ impl<'a> SyncPipeline<'a> {
         if let Some(journal) = self.journal_mgr.load_journal()? {
             warn!(
                 "Found incomplete journal from {}. Resuming interrupted operation.",
-                journal.started_at
+                self.config.timezone.format_message_datetime(journal.started_at)
             );
             return self.resume_from_journal(&journal, options);
         }
@@ -528,7 +528,8 @@ impl<'a> SyncPipeline<'a> {
         let start = Instant::now();
         info!(
             "Resuming {} operation from journal (started {})",
-            journal.operation, journal.started_at
+            journal.operation,
+            self.config.timezone.format_message_datetime(journal.started_at)
         );
 
         // Re-acquire lock — the old lock may have expired or been released.
