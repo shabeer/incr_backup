@@ -275,6 +275,16 @@ impl SnapshotTimezone {
         }
     }
 
+    /// Format a UTC DateTime for human-readable display according to this timezone setting.
+    pub fn format_display_datetime(&self, dt: DateTime<Utc>) -> String {
+        match self {
+            SnapshotTimezone::Utc => dt.format("%Y-%m-%dT%H:%MZ").to_string(),
+            SnapshotTimezone::Local => {
+                dt.with_timezone(&Local).format("%Y-%m-%dT%H:%M%:z").to_string()
+            }
+        }
+    }
+
     /// Format the current time according to this timezone setting.
     pub fn now_formatted(&self) -> String {
         self.format_datetime(Utc::now())
@@ -1184,6 +1194,13 @@ path = "gdrive:original"
         assert!(local_formatted.starts_with("2026-10-29T"));
         assert!(local_formatted.contains('+') || local_formatted.contains('-'));
         assert!(!local_formatted.contains(':')); // No colons!
+
+        let utc_display = SnapshotTimezone::Utc.format_display_datetime(now_utc);
+        assert_eq!(utc_display, "2026-10-29T04:28Z");
+
+        let local_display = SnapshotTimezone::Local.format_display_datetime(now_utc);
+        assert!(local_display.contains(':')); // Colons for time and offset
+        assert!(local_display.contains('+') || local_display.contains('-'));
     }
 
     #[test]

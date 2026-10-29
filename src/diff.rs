@@ -5,7 +5,7 @@
 
 use log::info;
 
-use crate::config::Config;
+use crate::config::{Config, SnapshotTimezone};
 use crate::error::Result;
 use crate::manifest::{self, DiffResult, Manifest, format_size};
 use crate::rclone::Rclone;
@@ -55,7 +55,7 @@ pub fn run_diff(config: &Config, rclone: &Rclone, options: &DiffOptions) -> Resu
     if options.json_output {
         diff.to_json()
     } else {
-        Ok(format_diff(&diff, options, &manifest_a, &manifest_b))
+        Ok(format_diff(&diff, options, &manifest_a, &manifest_b, config.timezone))
     }
 }
 
@@ -72,6 +72,7 @@ fn format_diff(
     options: &DiffOptions,
     manifest_a: &Manifest,
     manifest_b: &Manifest,
+    timezone: SnapshotTimezone,
 ) -> String {
     let mut output = String::new();
 
@@ -79,9 +80,9 @@ fn format_diff(
     output.push_str(&format!(
         "Comparing: {} ({}) ↔ {} ({})\n\n",
         options.snapshot_a,
-        manifest_a.created_at.format("%Y-%m-%dT%H:%M"),
+        timezone.format_display_datetime(manifest_a.created_at),
         options.snapshot_b,
-        manifest_b.created_at.format("%Y-%m-%dT%H:%M"),
+        timezone.format_display_datetime(manifest_b.created_at),
     ));
 
     if options.stat_only {
@@ -172,10 +173,15 @@ mod tests {
         let ma = Manifest::empty();
         let mb = Manifest::empty();
 
-        let output = format_diff(&diff, &options, &ma, &mb);
+        let output = format_diff(&diff, &options, &ma, &mb, SnapshotTimezone::Utc);
         assert!(output.contains("0 added"));
         assert!(output.contains("0 deleted"));
         assert!(output.contains("0 modified"));
+        assert!(output.contains("Comparing: hourly.0 ("));
+        assert!(output.contains("Z) ↔ hourly.1 ("));
+
+        let local_output = format_diff(&diff, &options, &ma, &mb, SnapshotTimezone::Local);
+        assert!(local_output.contains('+') || local_output.contains('-'));
     }
 }
 

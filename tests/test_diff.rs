@@ -50,7 +50,7 @@ fn test_diff_command() {
         .assert()
         .success();
 
-    // 1. Human readable diff between hourly.0 and hourly.1
+    // 1. Human readable diff between hourly.0 and hourly.1 (default UTC timezone with Z)
     env.command()
         .args([
             "diff",
@@ -63,7 +63,24 @@ fn test_diff_command() {
         .success()
         .stdout(predicate::str::contains("added.txt"))
         .stdout(predicate::str::contains("modified.txt"))
-        .stdout(predicate::str::contains("to_delete.txt"));
+        .stdout(predicate::str::contains("to_delete.txt"))
+        .stdout(predicate::str::contains("Comparing: hourly.0 ("))
+        .stdout(predicate::str::contains("Z) ↔ hourly.1 ("));
+
+    // 1b. Human readable diff with --timezone local (shows local offset)
+    env.command()
+        .args([
+            "diff",
+            "hourly.0",
+            "hourly.1",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "local",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_match(r"Comparing: hourly\.0 \(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{2}:\d{2}\) ↔ hourly\.1 \(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+-]\d{2}:\d{2}\)").unwrap());
 
     // 2. Diff with --stat
     env.command()

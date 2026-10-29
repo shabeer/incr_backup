@@ -500,6 +500,14 @@ pub fn parse_snapshot_timestamp(ts: &str) -> Option<chrono::DateTime<Utc>> {
         return Some(dt.with_timezone(&Utc));
     }
 
+    // Try format with colons and timezone offset (e.g., "2026-10-29T09:49+05:30", "2026-10-29T09:49+0530")
+    if let Ok(dt) = chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M%:z") {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M%z") {
+        return Some(dt.with_timezone(&Utc));
+    }
+
     // 2. Try timezone-aware format with %z (e.g., "2026-10-29T09-49+0530")
     if let Ok(dt) = chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H-%M%z") {
         return Some(dt.with_timezone(&Utc));
@@ -508,9 +516,15 @@ pub fn parse_snapshot_timestamp(ts: &str) -> Option<chrono::DateTime<Utc>> {
         return Some(dt.with_timezone(&Utc));
     }
 
-    // 3. Try UTC with 'Z' suffix (e.g., "2026-10-29T04-28Z")
+    // 3. Try UTC with 'Z' suffix (e.g., "2026-10-29T04-28Z", "2026-10-29T04:28Z")
     if ts.ends_with('Z') || ts.ends_with('z') {
         let without_z = &ts[..ts.len() - 1];
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(without_z, "%Y-%m-%dT%H:%M") {
+            return Some(dt.and_utc());
+        }
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(without_z, "%Y-%m-%dT%H:%M:%S") {
+            return Some(dt.and_utc());
+        }
         if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(without_z, "%Y-%m-%dT%H-%M") {
             return Some(dt.and_utc());
         }
@@ -620,6 +634,14 @@ mod tests {
         assert_eq!(dt_offset.month(), 10);
         assert_eq!(dt_offset.day(), 28);
         assert_eq!(dt_offset.hour(), 8); // 13:30 - 05:30 = 08:00 UTC
+
+        // Display format with colons and offset +05:30
+        let dt_colon_offset = parse_snapshot_timestamp("2026-10-28T13:30+05:30").unwrap();
+        assert_eq!(dt_colon_offset.hour(), 8);
+
+        // Display format with colons and Z
+        let dt_colon_z = parse_snapshot_timestamp("2026-10-28T08:00Z").unwrap();
+        assert_eq!(dt_colon_z.hour(), 8);
     }
 
     #[test]
