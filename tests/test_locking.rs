@@ -19,7 +19,7 @@ fn test_lock_prevents_concurrent_sync() {
         "holder": "another-machine.local",
         "pid": 99999,
         "started_at": chrono::Utc::now().to_rfc3339(),
-        "timeout_minutes": 60
+        "timeout_minutes": 600000
     });
     let lock_path = env.remote_path.join(".meta/lock");
     std::fs::write(&lock_path, serde_json::to_string(&lock_json).unwrap()).unwrap();
@@ -64,7 +64,7 @@ fn test_lock_error_respects_timezone() {
         "holder": "shabeer-mac.local",
         "pid": 99999,
         "started_at": "2026-10-29T06:30:05.775308Z",
-        "timeout_minutes": 60
+        "timeout_minutes": 600000
     });
     let meta_dir = env.remote_path.join(".meta");
     std::fs::create_dir_all(&meta_dir).unwrap();

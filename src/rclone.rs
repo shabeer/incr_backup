@@ -405,6 +405,16 @@ impl Rclone {
         )
     }
 
+    /// Run `rclone copyto <source> <dest>`.
+    ///
+    /// Copy a single file or directory to a specific destination path.
+    pub fn copyto(&self, source: &str, dest: &str) -> Result<String> {
+        self.run_rclone(
+            &["copyto".to_string(), source.to_string(), dest.to_string()],
+            true,
+        )
+    }
+
     // ─── Private Helpers ────────────────────────────────────────────────
 
     /// Build and execute an rclone command, capturing output.

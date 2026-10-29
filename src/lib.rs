@@ -38,4 +38,5 @@ pub mod verify;
 pub mod journal;
 pub mod lock;
 pub mod remove;
+pub mod compact;
 pub mod error;

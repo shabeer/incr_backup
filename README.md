@@ -150,6 +150,33 @@ incr-backup config push
 incr-backup config pull --to ./incr-backup.toml
 ```
 
+### 9. Dynamic Snapshot Consolidation (`compact`)
+
+Consolidate multiple snapshots in a user-specified date range into a single named snapshot using reverse-incremental dependency resolution and a two-phase safe commit protocol:
+
+```bash
+# Preview compaction plan with high-level summary
+incr-backup compact \
+    --from 2026-10-28T00:00:00+05:30 \
+    --to 2026-10-28T23:59:59+05:30 \
+    --name daily-2026-10-28 \
+    --dry-run --summary
+
+# Preview detailed file-by-file plan
+incr-backup compact \
+    --from 2026-10-28T00:00:00+05:30 \
+    --to 2026-10-28T23:59:59+05:30 \
+    --name daily-2026-10-28 \
+    --dry-run --full-list
+
+# Execute compaction (creates verified daily-2026-10-28 and purges source snapshots)
+incr-backup compact \
+    --from 2026-10-28T00:00:00+05:30 \
+    --to 2026-10-28T23:59:59+05:30 \
+    --name daily-2026-10-28
+```
+
+
 ---
 
 ## Retention Presets & Lifecycle

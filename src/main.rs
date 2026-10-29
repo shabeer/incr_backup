@@ -210,6 +210,33 @@ enum Commands {
         json: bool,
     },
 
+    /// Consolidate multiple snapshots within a date range into a single named snapshot.
+    Compact {
+        /// Start of snapshot timestamp range (ISO-8601 with explicit timezone offset).
+        #[arg(long = "from")]
+        from: String,
+
+        /// End of snapshot timestamp range (ISO-8601 with explicit timezone offset).
+        #[arg(long = "to")]
+        to: String,
+
+        /// Name for the consolidated snapshot.
+        #[arg(long = "name")]
+        name: String,
+
+        /// Show high-level summary of changes.
+        #[arg(long = "summary")]
+        summary: bool,
+
+        /// Show detailed file-by-file plan.
+        #[arg(long = "full-list")]
+        full_list: bool,
+
+        /// Break stale lock and run if locked.
+        #[arg(long = "force")]
+        force: bool,
+    },
+
     /// Manage configuration between local file and remote metadata.
     Config {
         #[command(subcommand)]
@@ -368,6 +395,17 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
             json,
         } => {
             cmd_remove(config, paths, path, force, json)?;
+        }
+
+        Commands::Compact {
+            from,
+            to,
+            name,
+            summary,
+            full_list,
+            force,
+        } => {
+            cmd_compact(config, from, to, name, summary, full_list, force)?;
         }
 
         Commands::Config { action } => {
@@ -744,6 +782,21 @@ fn cmd_list(config: Config, json_output: bool) -> incr_backup::error::Result<()>
                 }));
             }
         }
+
+        // Include consolidated / non-tier snapshots
+        let all_meta = incr_backup::compact::discover_all_snapshots(&rclone, remote_base).unwrap_or_default();
+        for meta in all_meta {
+            let is_tier = tiers.iter().any(|t| meta.name.starts_with(&format!("{}.", t.prefix())));
+            if !is_tier {
+                all_snapshots.push(serde_json::json!({
+                    "tier": "consolidated",
+                    "name": meta.name,
+                    "timestamp": meta.created_at.to_rfc3339(),
+                    "dir_name": meta.diff_dir,
+                }));
+            }
+        }
+
         println!("{}", serde_json::to_string_pretty(&all_snapshots)?);
     } else {
         println!("Snapshots at {}:\n", remote_base);
@@ -758,10 +811,66 @@ fn cmd_list(config: Config, json_output: bool) -> incr_backup::error::Result<()>
                 total += snapshots.len();
             }
         }
+
+        // Consolidated / non-tier snapshots
+        let all_meta = incr_backup::compact::discover_all_snapshots(&rclone, remote_base).unwrap_or_default();
+        let mut consolidated = Vec::new();
+        for meta in all_meta {
+            let is_tier = tiers.iter().any(|t| meta.name.starts_with(&format!("{}.", t.prefix())));
+            if !is_tier {
+                consolidated.push(meta);
+            }
+        }
+        if !consolidated.is_empty() {
+            println!("  consolidated:");
+            for snap in &consolidated {
+                println!("    {}", snap.name);
+            }
+            total += consolidated.len();
+        }
+
         if total == 0 {
             println!("  (no snapshots yet)");
         }
         println!("\nTotal: {} snapshots", total);
+    }
+
+    Ok(())
+}
+
+fn cmd_compact(
+    config: Config,
+    from: String,
+    to: String,
+    name: String,
+    summary: bool,
+    full_list: bool,
+    force: bool,
+) -> incr_backup::error::Result<()> {
+    let rclone = Rclone::new(&config);
+    let options = incr_backup::compact::CompactOptions {
+        from,
+        to,
+        name,
+        summary,
+        full_list,
+        dry_run: config.dry_run,
+        force_lock: force,
+    };
+
+    let result = incr_backup::compact::run_compact(&config, &rclone, &options)?;
+
+    if !config.dry_run {
+        println!(
+            "✓ Compaction complete: {} ({} snapshots consolidated, {} diff files kept [{}], {} discarded [{} reclaimed], {:.1}s)",
+            result.name,
+            result.snapshots_consolidated,
+            result.files_kept,
+            format_size(result.bytes_kept),
+            result.files_discarded,
+            format_size(result.bytes_discarded),
+            result.duration.as_secs_f64(),
+        );
     }
 
     Ok(())

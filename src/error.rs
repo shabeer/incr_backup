@@ -118,6 +118,24 @@ pub enum IncrError {
     #[error("invalid snapshot name: '{name}'. Expected format: hourly.0, daily.2, weekly.1, etc.")]
     InvalidSnapshotName { name: String },
 
+    // ── Compaction Errors ───────────────────────────────────────────────
+
+    /// Timezone offset in CLI parameter does not match configured backup timezone.
+    #[error("Timezone offset in {param} ({got}) does not match configured backup timezone ({expected}).")]
+    TimezoneMismatch {
+        param: String,
+        got: String,
+        expected: String,
+    },
+
+    /// No snapshots found within the specified date range.
+    #[error("No snapshots found in range [{from}, {to}]")]
+    NoSnapshotsInRange { from: String, to: String },
+
+    /// General compaction error.
+    #[error("compaction error: {0}")]
+    CompactionError(String),
+
     // ── Remove Errors ───────────────────────────────────────────────────
 
     /// Invalid target path for remove operation.

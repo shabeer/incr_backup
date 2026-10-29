@@ -21,7 +21,7 @@ use crate::error::{IncrError, Result};
 use crate::manifest::{FileEntry, Manifest};
 use crate::rclone::Rclone;
 use crate::scanner;
-use crate::snapshot::{SnapshotInfo, SnapshotName, SnapshotTier, RotationManager};
+use crate::snapshot::{SnapshotName, RotationManager};
 
 /// Options for a restore operation.
 #[derive(Debug, Clone)]
@@ -100,25 +100,32 @@ pub fn run_restore(config: &Config, rclone: &Rclone, options: &RestoreOptions) -
         return restore_current(config, rclone, options, start);
     }
 
+    // Advisory lock check (Section 310)
+    let lock_mgr = crate::lock::LockManager::new(rclone, remote_base, config.timezone);
+    if let Ok(Some(lock)) = lock_mgr.check() {
+        if !crate::lock::is_stale(&lock) {
+            warn!(
+                "Backup is currently locked by '{}' (since {}). A sync or compaction operation may be in progress.",
+                lock.holder,
+                config.timezone.format_message_datetime(lock.started_at)
+            );
+        }
+    }
+
     // Step 3: Load target manifest
-    let manifest_path = format!(
-        "{}/.meta/manifests/{}.json",
-        remote_base,
-        options.snapshot.replace("__", ".").split("__").next().unwrap_or(&options.snapshot)
-    );
-
-    let manifest_json = rclone.cat(&manifest_path).map_err(|_| {
-        IncrError::SnapshotNotFound(options.snapshot.clone())
-    })?;
-
-    let target_manifest = Manifest::from_json(&manifest_json)?;
+    let target_manifest = load_target_manifest(rclone, remote_base, &options.snapshot)?;
 
     // Step 4: Get snapshots between target and current
-    let (target_tier, target_index) = SnapshotName::parse_ref(&options.snapshot)?;
     let retention = &config.retention;
     let rotation_mgr = RotationManager::new(rclone, remote_base, retention);
 
-    let snapshots_after = get_snapshots_after(rclone, &rotation_mgr, remote_base, &target_tier, target_index)?;
+    let snapshots_after = get_snapshots_after(
+        rclone,
+        &rotation_mgr,
+        remote_base,
+        &options.snapshot,
+        &target_manifest,
+    )?;
 
     // Step 5: Resolve file locations
     let mut resolved = resolve_locations(&target_manifest, &snapshots_after);
@@ -262,29 +269,148 @@ pub fn resolve_locations(
     }).collect()
 }
 
-/// Get all snapshots between the target and current, ordered closest-first.
+/// Load target manifest from remote by snapshot name.
+fn load_target_manifest(
+    rclone: &Rclone,
+    remote_base: &str,
+    snapshot_name: &str,
+) -> Result<Manifest> {
+    // 1. Try direct exact match with .json
+    let direct_path = format!("{remote_base}/.meta/manifests/{snapshot_name}.json");
+    if let Ok(json) = rclone.cat(&direct_path) {
+        if let Ok(m) = Manifest::from_json(&json) {
+            return Ok(m);
+        }
+    }
+
+    // 2. Try if snapshot_name already ends with .json
+    if snapshot_name.ends_with(".json") {
+        let direct_path = format!("{remote_base}/.meta/manifests/{snapshot_name}");
+        if let Ok(json) = rclone.cat(&direct_path) {
+            if let Ok(m) = Manifest::from_json(&json) {
+                return Ok(m);
+            }
+        }
+    }
+
+    // 3. Try splitting "__" (e.g., "hourly.0__2026-..." -> "hourly.0")
+    if snapshot_name.contains("__") {
+        let prefix = snapshot_name.split("__").next().unwrap();
+        let path = format!("{remote_base}/.meta/manifests/{prefix}.json");
+        if let Ok(json) = rclone.cat(&path) {
+            if let Ok(m) = Manifest::from_json(&json) {
+                return Ok(m);
+            }
+        }
+    }
+
+    // 4. Scan all manifests in .meta/manifests/
+    let manifests_dir = format!("{remote_base}/.meta/manifests/");
+    if let Ok(files) = rclone.lsf(&manifests_dir) {
+        for f in files {
+            if !f.ends_with(".json") || f == "current.json" {
+                continue;
+            }
+            let stem = f.trim_end_matches(".json");
+            if stem == snapshot_name {
+                let path = format!("{manifests_dir}{f}");
+                if let Ok(json) = rclone.cat(&path) {
+                    if let Ok(m) = Manifest::from_json(&json) {
+                        return Ok(m);
+                    }
+                }
+            }
+            // Check inside manifest for matching snapshot_name
+            let path = format!("{manifests_dir}{f}");
+            if let Ok(json) = rclone.cat(&path) {
+                if let Ok(m) = Manifest::from_json(&json) {
+                    if m.snapshot_name == snapshot_name {
+                        return Ok(m);
+                    }
+                }
+            }
+        }
+    }
+
+    Err(IncrError::SnapshotNotFound(snapshot_name.to_string()))
+}
+
+/// Get all snapshots between the target and current, ordered closest-first (oldest after target first).
 fn get_snapshots_after(
     rclone: &Rclone,
     rotation_mgr: &RotationManager,
     remote_base: &str,
-    target_tier: &SnapshotTier,
-    target_index: u32,
+    target_snapshot: &str,
+    target_manifest: &Manifest,
 ) -> Result<Vec<SnapshotDiffFiles>> {
-    let all = rotation_mgr.list_snapshots(target_tier)?;
+    let target_ref = SnapshotName::parse_ref(target_snapshot).ok();
 
-    // Scan snapshots from 0 up to target_index
-    let after: Vec<SnapshotInfo> = all
-        .into_iter()
-        .filter(|s| s.name.index <= target_index)
-        .collect();
+    // Discover all snapshots across remote
+    let all_snapshots =
+        crate::compact::discover_all_snapshots(rclone, remote_base).unwrap_or_default();
+
+    let mut after_diffs: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
+
+    for snap in &all_snapshots {
+        // Skip target itself
+        if snap.manifest_name == format!("{target_snapshot}.json")
+            || snap.name == target_snapshot
+            || snap.manifest.created_at == target_manifest.created_at
+        {
+            continue;
+        }
+
+        let is_after = if let (Some((t_tier, t_idx)), Ok(snap_name)) =
+            (&target_ref, SnapshotName::parse(&snap.name))
+        {
+            if snap_name.tier == *t_tier && snap_name.index < *t_idx {
+                true
+            } else {
+                snap.created_at > target_manifest.created_at
+            }
+        } else if let (Some((t_tier, t_idx)), Ok((s_tier, s_idx))) =
+            (&target_ref, SnapshotName::parse_ref(&snap.name))
+        {
+            if s_tier == *t_tier && s_idx < *t_idx {
+                true
+            } else {
+                snap.created_at > target_manifest.created_at
+            }
+        } else {
+            snap.created_at > target_manifest.created_at
+        };
+
+        if is_after {
+            if let Some(ref dir) = snap.diff_dir {
+                if !after_diffs.iter().any(|(_, d)| d == dir) {
+                    after_diffs.push((snap.created_at, dir.clone()));
+                }
+            }
+        }
+    }
+
+    // Also check if any existing diff dir matches tier rotation (e.g. hourly.0 when target is hourly.1)
+    if let Some((target_tier, target_index)) = target_ref {
+        let tier_snaps = rotation_mgr.list_snapshots(&target_tier).unwrap_or_default();
+        for s in tier_snaps {
+            if s.name.index < target_index && !after_diffs.iter().any(|(_, d)| d == &s.dir_name) {
+                let ts = crate::snapshot::parse_snapshot_timestamp(&s.name.timestamp)
+                    .unwrap_or_else(|| target_manifest.created_at + chrono::Duration::seconds(10));
+                after_diffs.push((ts, s.dir_name));
+            }
+        }
+    }
+
+    // Sort chronologically: oldest after target first (closest to target time)
+    after_diffs.sort_by_key(|(dt, _)| *dt);
 
     let mut diff_snaps = Vec::new();
-    for snap in after {
-        let diff_path = format!("{}/diffs/{}", remote_base, snap.dir_name);
+    for (_, dir_name) in after_diffs {
+        let diff_path = format!("{}/diffs/{}", remote_base, dir_name);
         let files = rclone.lsf_files_recursive(&diff_path).unwrap_or_default();
         let file_set: std::collections::HashSet<String> = files.into_iter().collect();
         diff_snaps.push(SnapshotDiffFiles {
-            dir_name: snap.dir_name,
+            dir_name,
             files: file_set,
         });
     }
