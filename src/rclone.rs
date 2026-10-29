@@ -140,17 +140,27 @@ impl Rclone {
         self.lsjson(remote_path, true, true)
     }
 
-    /// Run `rclone move source dest [--exclude ...]`.
+    /// Run `rclone move source dest [--exclude ...] [--delete-empty-src-dirs]`.
     ///
     /// On Google Drive, this is a **server-side** operation — only metadata
     /// is updated, no data re-upload. Used during `init --adopt` to move
     /// existing files into `current/`.
-    pub fn move_dir(&self, source: &str, dest: &str, excludes: &[String]) -> Result<String> {
+    pub fn move_dir(
+        &self,
+        source: &str,
+        dest: &str,
+        excludes: &[String],
+        delete_empty_src_dirs: bool,
+    ) -> Result<String> {
         let mut args = vec!["move".to_string(), source.to_string(), dest.to_string()];
 
         for pattern in excludes {
             args.push("--exclude".to_string());
             args.push(pattern.clone());
+        }
+
+        if delete_empty_src_dirs {
+            args.push("--delete-empty-src-dirs".to_string());
         }
 
         self.run_rclone(&args, /* is_mutating */ true)

@@ -90,9 +90,10 @@ fn test_init_fails_without_adopt_if_remote_not_empty() {
 #[test]
 fn test_init_adopt_existing_files() {
     let env = TestEnv::new();
-    // Simulate preexisting files directly in remote
+    // Simulate preexisting files and directories directly in remote
     env.write_remote_file("file1.txt", b"Content 1");
     env.write_remote_file("subdir/file2.txt", b"Content 2");
+    std::fs::create_dir_all(env.remote_path.join("empty_dir")).unwrap();
 
     env.command()
         .args([
@@ -113,6 +114,8 @@ fn test_init_adopt_existing_files() {
     assert!(env.remote_path.join("current/file1.txt").exists());
     assert!(env.remote_path.join("current/subdir/file2.txt").exists());
     assert!(!env.remote_path.join("file1.txt").exists());
+    assert!(!env.remote_path.join("subdir").exists());
+    assert!(!env.remote_path.join("empty_dir").exists());
     assert!(env.remote_path.join("diffs").exists());
     assert!(env.remote_path.join(".meta/config.json").exists());
 }

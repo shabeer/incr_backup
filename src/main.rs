@@ -493,7 +493,12 @@ fn cmd_init(
             "diffs/**".to_string(),
             ".meta/**".to_string(),
         ];
-        rclone.move_dir(&config.remote_path, &format!("{}/current/", config.remote_path), &move_excludes)?;
+        rclone.move_dir(
+            &config.remote_path,
+            &format!("{}/current/", config.remote_path),
+            &move_excludes,
+            true,
+        )?;
     }
 
     // Create remaining directory structure
