@@ -21,12 +21,11 @@ use crate::error::{IncrError, Result};
 use crate::manifest::{FileEntry, Manifest};
 use crate::rclone::Rclone;
 use crate::scanner;
-use crate::snapshot::{SnapshotName, RotationManager};
 
 /// Options for a restore operation.
 #[derive(Debug, Clone)]
 pub struct RestoreOptions {
-    /// Which snapshot to restore (e.g., "hourly.2", "daily.0", "current").
+    /// Which snapshot to restore (e.g., "2026-10-28T08-00Z", "daily-2026-10-27", "current").
     pub snapshot: String,
     /// Local directory to restore files into.
     pub destination: PathBuf,
@@ -46,7 +45,7 @@ pub struct ResolveEntry {
     /// The file's metadata from the target manifest.
     pub file: FileEntry,
     /// Full remote path where this version lives
-    /// (e.g., "diffs/hourly.1/documents/report.pdf" or "current/file.txt").
+    /// (e.g., "diffs/2026-10-28T08-00Z/documents/report.pdf" or "current/file.txt").
     pub remote_path: String,
 }
 
@@ -116,12 +115,8 @@ pub fn run_restore(config: &Config, rclone: &Rclone, options: &RestoreOptions) -
     let target_manifest = load_target_manifest(rclone, remote_base, &options.snapshot)?;
 
     // Step 4: Get snapshots between target and current
-    let retention = &config.retention;
-    let rotation_mgr = RotationManager::new(rclone, remote_base, retention);
-
     let snapshots_after = get_snapshots_after(
         rclone,
-        &rotation_mgr,
         remote_base,
         &options.snapshot,
         &target_manifest,
@@ -293,18 +288,7 @@ fn load_target_manifest(
         }
     }
 
-    // 3. Try splitting "__" (e.g., "hourly.0__2026-..." -> "hourly.0")
-    if snapshot_name.contains("__") {
-        let prefix = snapshot_name.split("__").next().unwrap();
-        let path = format!("{remote_base}/.meta/manifests/{prefix}.json");
-        if let Ok(json) = rclone.cat(&path) {
-            if let Ok(m) = Manifest::from_json(&json) {
-                return Ok(m);
-            }
-        }
-    }
-
-    // 4. Scan all manifests in .meta/manifests/
+    // 3. Scan all manifests in .meta/manifests/
     let manifests_dir = format!("{remote_base}/.meta/manifests/");
     if let Ok(files) = rclone.lsf(&manifests_dir) {
         for f in files {
@@ -338,13 +322,10 @@ fn load_target_manifest(
 /// Get all snapshots between the target and current, ordered closest-first (oldest after target first).
 fn get_snapshots_after(
     rclone: &Rclone,
-    rotation_mgr: &RotationManager,
     remote_base: &str,
     target_snapshot: &str,
     target_manifest: &Manifest,
 ) -> Result<Vec<SnapshotDiffFiles>> {
-    let target_ref = SnapshotName::parse_ref(target_snapshot).ok();
-
     // Discover all snapshots across remote
     let all_snapshots =
         crate::compact::discover_all_snapshots(rclone, remote_base).unwrap_or_default();
@@ -360,43 +341,11 @@ fn get_snapshots_after(
             continue;
         }
 
-        let is_after = if let (Some((t_tier, t_idx)), Ok(snap_name)) =
-            (&target_ref, SnapshotName::parse(&snap.name))
-        {
-            if snap_name.tier == *t_tier && snap_name.index < *t_idx {
-                true
-            } else {
-                snap.created_at > target_manifest.created_at
-            }
-        } else if let (Some((t_tier, t_idx)), Ok((s_tier, s_idx))) =
-            (&target_ref, SnapshotName::parse_ref(&snap.name))
-        {
-            if s_tier == *t_tier && s_idx < *t_idx {
-                true
-            } else {
-                snap.created_at > target_manifest.created_at
-            }
-        } else {
-            snap.created_at > target_manifest.created_at
-        };
-
-        if is_after {
+        if snap.created_at > target_manifest.created_at {
             if let Some(ref dir) = snap.diff_dir {
                 if !after_diffs.iter().any(|(_, d)| d == dir) {
                     after_diffs.push((snap.created_at, dir.clone()));
                 }
-            }
-        }
-    }
-
-    // Also check if any existing diff dir matches tier rotation (e.g. hourly.0 when target is hourly.1)
-    if let Some((target_tier, target_index)) = target_ref {
-        let tier_snaps = rotation_mgr.list_snapshots(&target_tier).unwrap_or_default();
-        for s in tier_snaps {
-            if s.name.index < target_index && !after_diffs.iter().any(|(_, d)| d == &s.dir_name) {
-                let ts = crate::snapshot::parse_snapshot_timestamp(&s.name.timestamp)
-                    .unwrap_or_else(|| target_manifest.created_at + chrono::Duration::seconds(10));
-                after_diffs.push((ts, s.dir_name));
             }
         }
     }
@@ -500,7 +449,7 @@ mod tests {
     fn test_resolve_locations_no_diffs() {
         // When there are no snapshots after the target, all files come from current/
         let manifest = Manifest::new(
-            "hourly.2",
+            "2026-10-28T07-00Z",
             vec![
                 sample_entry("a.txt", "aaa"),
                 sample_entry("b.txt", "bbb"),
@@ -528,13 +477,13 @@ mod tests {
             },
             ResolveEntry {
                 file: sample_entry("c.txt", "ccc"),
-                remote_path: "diffs/hourly.0__2026-10-28T08-00/c.txt".to_string(),
+                remote_path: "diffs/2026-10-28T08-00Z/c.txt".to_string(),
             },
         ];
 
         let groups = group_by_remote_dir(&entries, "remote:backup");
 
-        assert_eq!(groups.len(), 2); // current/ and diffs/hourly.0/
+        assert_eq!(groups.len(), 2); // current/ and diffs/2026-10-28T08-00Z/
         assert_eq!(groups["remote:backup/current/"].len(), 2);
     }
 }

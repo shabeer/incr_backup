@@ -10,8 +10,8 @@
 
 - [1. `init` Command](#1-init-command)
 - [2. `sync` Command — Core Operation](#2-sync-command--core-operation)
-- [3. `sync` — Retention & Rotation](#3-sync--retention--rotation)
-- [4. `sync` — Cascade Promotion](#4-sync--cascade-promotion)
+- [3. `sync` — Discrete Snapshots & Naming](#3-sync--discrete-snapshots--naming)
+- [4. `sync` — Point-in-Time Integrity & Re-sync Behavior](#4-sync--point-in-time-integrity--re-sync-behavior)
 - [5. `list` Command](#5-list-command)
 - [6. `status` Command](#6-status-command)
 - [7. `restore` Command](#7-restore-command)
@@ -50,20 +50,20 @@
 | **Test Name**    | Initialize a new backup namespace on an empty remote |
 | **Preconditions** | rclone remote `gdrive:` is configured and authenticated. Target path `gdrive:backups/myhost` does not exist. |
 | **Steps**        | 1. Run `incr-backup init --remote gdrive:backups/myhost --source /home/user/docs` |
-| **Expected Result** | - Exit code 0. <br>- Remote directory `gdrive:backups/myhost/current/` is created (empty). <br>- `gdrive:backups/myhost/.meta/config.json` is created with source path, remote, and default retention policy (e.g., `hourly: 6, daily: 7, weekly: 4, monthly: 12`). <br>- `gdrive:backups/myhost/.meta/journal.json` is created (empty/clean state). <br>- No `diffs/` directory created yet. <br>- Local config file is written (e.g., `~/.config/incr-backup/<namespace>.toml`). |
+| **Expected Result** | - Exit code 0. <br>- Remote directory `gdrive:backups/myhost/current/` is created (empty). <br>- `gdrive:backups/myhost/.meta/config.json` is created with source path and remote info. <br>- `gdrive:backups/myhost/.meta/journal.json` is created (empty/clean state). <br>- No `diffs/` directory created yet. <br>- Local config file is written (e.g., `~/.config/incr-backup/<namespace>.toml`). |
 | **Category**     | e2e |
 
 ---
 
-### TC-INIT-002 — Init with custom retention policy
+### TC-INIT-002 — Init with configuration file
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-INIT-002 |
-| **Test Name**    | Initialize with custom retention counts |
-| **Preconditions** | Remote is configured and target path does not exist. |
-| **Steps**        | 1. Run `incr-backup init --remote gdrive:backups/myhost --source /home/user/docs --hourly 12 --daily 14 --weekly 8 --monthly 24` |
-| **Expected Result** | - `config.json` contains `hourly: 12, daily: 14, weekly: 8, monthly: 24`. <br>- All other behavior identical to TC-INIT-001. |
+| **Test Name**    | Initialize from local config file |
+| **Preconditions** | Remote is configured and target path does not exist. `backup.toml` specifies source, remote, and excludes. |
+| **Steps**        | 1. Run `incr-backup init -c backup.toml` |
+| **Expected Result** | - `config.json` uploaded to remote with source, remote, and exclude settings. <br>- All other behavior identical to TC-INIT-001. |
 | **Category**     | e2e |
 
 ---
@@ -177,10 +177,10 @@
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-INIT-011 |
-| **Test Name**    | Init uses source, remote, and retention from config file when flags are omitted |
-| **Preconditions** | `incr-backup.toml` exists with valid `[source]`, `[remote]`, and `[retention]`. Remote target is empty. |
+| **Test Name**    | Init uses source, remote, and options from config file when flags are omitted |
+| **Preconditions** | `incr-backup.toml` exists with valid `[source]` and `[remote]`. Remote target is empty. |
 | **Steps**        | 1. Run `incr-backup init` |
-| **Expected Result** | - Exit code 0. <br>- `source` and `remote` read from `incr-backup.toml`. <br>- Retention from config file uploaded to remote `.meta/config.json`. <br>- Directory structure (`current/`, `diffs/`, `.meta/`) created on remote. |
+| **Expected Result** | - Exit code 0. <br>- `source` and `remote` read from `incr-backup.toml`. <br>- Config uploaded to remote `.meta/config.json`. <br>- Directory structure (`current/`, `diffs/`, `.meta/`) created on remote. |
 | **Category**     | integration |
 
 ---
@@ -233,8 +233,8 @@
 | **Test ID**      | TC-SYNC-001 |
 | **Test Name**    | Initial sync populates `current/` |
 | **Preconditions** | `init` completed. Source has 10 files. No prior syncs. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - Lock acquired in `.meta/lock`. <br>- Journal written with operation start. <br>- `rclone sync` runs from source → `current/` (no `--backup-dir` needed since no rotation target yet, OR `--backup-dir` pointing to `diffs/hourly.0/<timestamp>`). <br>- Manifest generated and uploaded to `.meta/manifests/`. <br>- `diffs/hourly.0/` snapshot directory created with timestamp marker. <br>- Journal cleared. Lock released. <br>- Exit code 0. |
+| **Steps**        | 1. Run `incr-backup sync` |
+| **Expected Result** | - Lock acquired in `.meta/lock`. <br>- Journal written with operation start. <br>- `rclone sync` runs from source → `current/`. <br>- Manifest generated and uploaded to `.meta/manifests/<snapshot_name>.json` and `.meta/manifests/current.json`. <br>- Journal cleared. Lock released. <br>- Exit code 0. |
 | **Category**     | e2e |
 
 ---
@@ -246,8 +246,8 @@
 | **Test ID**      | TC-SYNC-002 |
 | **Test Name**    | Sync detects and backs up changed files |
 | **Preconditions** | One prior sync completed. 3 files modified in source since last sync. |
-| **Steps**        | 1. Modify 3 files in source directory. <br>2. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - Hourly rotation occurs (hourly.0 → hourly.1, etc.). <br>- `rclone sync --backup-dir diffs/hourly.0/<timestamp>` runs. <br>- The 3 old versions of changed files appear in `diffs/hourly.0/<timestamp>/`. <br>- `current/` has the new versions. <br>- New manifest reflects updated md5/size/mtime for the 3 files. |
+| **Steps**        | 1. Modify 3 files in source directory. <br>2. Run `incr-backup sync` |
+| **Expected Result** | - `rclone sync --backup-dir diffs/<snapshot_name>` runs. <br>- The 3 old versions of changed files appear in `diffs/<snapshot_name>/`. <br>- `current/` has the new versions. <br>- New manifest reflects updated md5/size/mtime for the 3 files. |
 | **Category**     | e2e |
 
 ---
@@ -259,8 +259,8 @@
 | **Test ID**      | TC-SYNC-003 |
 | **Test Name**    | Deleted files are captured in diffs |
 | **Preconditions** | One prior sync completed. 2 files deleted from source. |
-| **Steps**        | 1. Delete 2 files from source. <br>2. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - The 2 deleted files appear in `diffs/hourly.0/<timestamp>/` (their last known versions). <br>- `current/` no longer contains the 2 files. <br>- New manifest does not list the 2 deleted files. |
+| **Steps**        | 1. Delete 2 files from source. <br>2. Run `incr-backup sync` |
+| **Expected Result** | - The 2 deleted files appear in `diffs/<snapshot_name>/` (their last known versions). <br>- `current/` no longer contains the 2 files. <br>- New manifest does not list the 2 deleted files. |
 | **Category**     | e2e |
 
 ---
@@ -272,8 +272,8 @@
 | **Test ID**      | TC-SYNC-004 |
 | **Test Name**    | Newly added files appear in current/ |
 | **Preconditions** | One prior sync completed. 5 new files added to source. |
-| **Steps**        | 1. Add 5 new files to source. <br>2. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - 5 new files uploaded to `current/`. <br>- `diffs/hourly.0/` has no entries for the new files (they didn't exist before). <br>- New manifest includes all 5 new files with correct hashes. |
+| **Steps**        | 1. Add 5 new files to source. <br>2. Run `incr-backup sync` |
+| **Expected Result** | - 5 new files uploaded to `current/`. <br>- `diffs/<snapshot_name>/` has no entries for the new files (they didn't exist before). <br>- New manifest includes all 5 new files with correct hashes. |
 | **Category**     | e2e |
 
 ---
@@ -285,8 +285,8 @@
 | **Test ID**      | TC-SYNC-005 |
 | **Test Name**    | Sync handles mixed change types simultaneously |
 | **Preconditions** | Prior sync completed. Source has 2 added, 3 modified, 1 deleted file. |
-| **Steps**        | 1. Make mixed changes. <br>2. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - Added files in `current/` only. <br>- Modified files: old versions in `diffs/hourly.0/`, new versions in `current/`. <br>- Deleted file: old version in `diffs/hourly.0/`, absent from `current/`. <br>- Manifest accurate for all changes. |
+| **Steps**        | 1. Make mixed changes. <br>2. Run `incr-backup sync` |
+| **Expected Result** | - Added files in `current/` only. <br>- Modified files: old versions in `diffs/<snapshot_name>/`, new versions in `current/`. <br>- Deleted file: old version in `diffs/<snapshot_name>/`, absent from `current/`. <br>- Manifest accurate for all changes. |
 | **Category**     | e2e |
 
 ---
@@ -298,8 +298,8 @@
 | **Test ID**      | TC-SYNC-006 |
 | **Test Name**    | Sync when source is unchanged |
 | **Preconditions** | Prior sync completed. No changes in source. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - Rotation still occurs (hourly slots shift). <br>- `rclone sync --backup-dir` runs but produces no backup files (nothing changed). <br>- New manifest is identical in content to previous. <br>- `diffs/hourly.0/` exists but contains only timestamp/manifest metadata (no file content). <br>- Exit code 0. |
+| **Steps**        | 1. Run `incr-backup sync` |
+| **Expected Result** | - `rclone sync --backup-dir` runs but produces no backup files (nothing changed). <br>- New manifest is identical in file content to previous. <br>- Exit code 0. |
 | **Category**     | e2e |
 
 ---
@@ -311,8 +311,8 @@
 | **Test ID**      | TC-SYNC-007 |
 | **Test Name**    | Sync when source directory is empty |
 | **Preconditions** | Prior sync with 10 files. Source directory now emptied (all files removed). |
-| **Steps**        | 1. Remove all files from source. <br>2. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - All 10 files moved to `diffs/hourly.0/`. <br>- `current/` is empty. <br>- Manifest has zero entries. <br>- Warning emitted: "Source directory is empty. All files will be deleted from current/." <br>- Exit code 0 (or configurable to require `--allow-empty`). |
+| **Steps**        | 1. Remove all files from source. <br>2. Run `incr-backup sync` |
+| **Expected Result** | - All 10 files moved to `diffs/<snapshot_name>/`. <br>- `current/` is empty. <br>- Manifest has zero entries. <br>- Warning emitted: "Source directory is empty. All files will be deleted from current/." <br>- Exit code 0. |
 | **Category**     | e2e |
 
 ---
@@ -324,7 +324,7 @@
 | **Test ID**      | TC-SYNC-008 |
 | **Test Name**    | Lock lifecycle during sync |
 | **Preconditions** | No lock present on remote. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly`. <br>2. Monitor `.meta/lock` during execution. |
+| **Steps**        | 1. Run `incr-backup sync`. <br>2. Monitor `.meta/lock` during execution. |
 | **Expected Result** | - `.meta/lock` is created at the start of sync with PID, hostname, and timestamp. <br>- `.meta/lock` is deleted upon successful completion. <br>- If interrupted, lock remains (tested separately). |
 | **Category**     | integration |
 
@@ -337,7 +337,7 @@
 | **Test ID**      | TC-SYNC-009 |
 | **Test Name**    | Manifest accuracy after sync |
 | **Preconditions** | Source has known files with pre-computed md5 hashes. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly`. <br>2. Download and parse the generated manifest. <br>3. Compare each entry against `rclone lsjson --hash` output. |
+| **Steps**        | 1. Run `incr-backup sync`. <br>2. Download and parse the generated manifest. <br>3. Compare each entry against `rclone lsjson --hash` output. |
 | **Expected Result** | - Manifest is valid JSON. <br>- Every file in `current/` has a manifest entry. <br>- Every manifest entry has `path`, `size`, `md5`, `mtime`. <br>- All fields match `rclone lsjson --hash` output exactly. |
 | **Category**     | integration |
 
@@ -350,168 +350,168 @@
 | **Test ID**      | TC-SYNC-010 |
 | **Test Name**    | Sync with --dry-run makes no changes |
 | **Preconditions** | Initialized namespace with prior sync. Source has changes. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly --dry-run` |
-| **Expected Result** | - Tool outputs what it *would* do (rotation plan, files to sync). <br>- No lock acquired. <br>- No files moved, uploaded, or deleted on remote. <br>- No manifest generated. <br>- Exit code 0. |
+| **Steps**        | 1. Run `incr-backup sync --dry-run` |
+| **Expected Result** | - Tool outputs what it *would* do (dry run preview). <br>- No lock acquired. <br>- No files moved, uploaded, or deleted on remote. <br>- No manifest generated. <br>- Exit code 0. |
 | **Category**     | e2e |
 
 ---
 
-## 3. `sync` — Retention & Rotation
+## 3. `sync` — Discrete Snapshots & Naming
 
-### TC-ROT-001 — Hourly rotation within retention limit
+### TC-SNAP-001 — Append-only discrete snapshot with ISO-8601 timestamp
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-ROT-001 |
-| **Test Name**    | Hourly snapshots rotate correctly within limits |
-| **Preconditions** | Retention: `hourly: 6`. Currently have hourly.0 through hourly.3 (4 snapshots). |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - hourly.3 → hourly.4 <br>- hourly.2 → hourly.3 <br>- hourly.1 → hourly.2 <br>- hourly.0 → hourly.1 <br>- New sync creates hourly.0. <br>- Total: 5 hourly snapshots. |
+| **Test ID**      | TC-SNAP-001 |
+| **Test Name**    | Each sync creates an independent timestamped snapshot |
+| **Preconditions** | Initialized namespace. Source has modified files. |
+| **Steps**        | 1. Run `incr-backup sync` |
+| **Expected Result** | - Creates an append-only snapshot directory in `diffs/<timestamp>` (e.g. `2026-10-29T10-30Z`). <br>- Generates and uploads `.meta/manifests/<timestamp>.json` and `.meta/manifests/current.json`. <br>- No slot limits, tier rotation, or overwrites. |
 | **Category**     | integration |
 
 ---
 
-### TC-ROT-002 — Hourly rotation at retention limit (oldest deleted)
+### TC-SNAP-002 — Sync with custom snapshot name (`--name`)
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-ROT-002 |
-| **Test Name**    | Oldest hourly deleted when retention limit reached |
-| **Preconditions** | Retention: `hourly: 6`. Currently have hourly.0 through hourly.5 (6 snapshots = full). |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - hourly.5 is DELETED (oldest, exceeds retention). <br>- hourly.4 → hourly.5 <br>- … <br>- hourly.0 → hourly.1 <br>- New hourly.0 created. <br>- Still 6 hourly snapshots total. |
+| **Test ID**      | TC-SNAP-002 |
+| **Test Name**    | Sync with user-specified snapshot name |
+| **Preconditions** | Initialized namespace. Source has changes. |
+| **Steps**        | 1. Run `incr-backup sync --name pre-deploy` |
+| **Expected Result** | - Diffs are stored in `diffs/pre-deploy/`. <br>- Manifest created at `.meta/manifests/pre-deploy.json`. <br>- Exit code 0. |
 | **Category**     | integration |
 
 ---
 
-### TC-ROT-003 — Re-sync within minimum interval (update in place)
+### TC-SNAP-003 — Timezone formatting (UTC and local offset)
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-ROT-003 |
-| **Test Name**    | Re-sync within same hour updates hourly.0 in place |
-| **Preconditions** | hourly.0 was created 15 minutes ago. Default minimum interval = 1 hour. |
-| **Steps**        | 1. Make changes to source. <br>2. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - No rotation occurs (hourly.0 is too recent). <br>- `rclone sync --backup-dir diffs/hourly.0/<timestamp>` re-runs, updating hourly.0's diff content in place. <br>- hourly.0's manifest is regenerated / replaced. <br>- Log message: "hourly.0 is less than 1h old; updating in place without rotation." |
+| **Test ID**      | TC-SNAP-003 |
+| **Test Name**    | Timezone configuration formats filesystem-safe snapshot names |
+| **Preconditions** | Initialized namespace. |
+| **Steps**        | 1. Run `incr-backup sync --timezone utc` <br>2. Run `incr-backup sync --timezone local` |
+| **Expected Result** | - UTC snapshot name ends with `Z` (e.g. `2026-10-29T10-30Z`). <br>- Local snapshot name contains formatted offset without colons (e.g. `2026-10-29T16-00+0530`). <br>- Both are valid filesystem path names on all platforms. |
 | **Category**     | integration |
 
 ---
 
-### TC-ROT-004 — Force rotate within minimum interval
+### TC-SNAP-004 — Rapid consecutive syncs create distinct immutable snapshots
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-ROT-004 |
-| **Test Name**    | --force-rotate overrides minimum interval |
-| **Preconditions** | hourly.0 was created 15 minutes ago. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly --force-rotate` |
-| **Expected Result** | - Rotation occurs despite hourly.0 being recent. <br>- hourly.0 → hourly.1, new hourly.0 created. <br>- Normal sync proceeds. |
-| **Category**     | integration |
-
----
-
-### TC-ROT-005 — Multiple rapid re-syncs without rotation
-
-| Field            | Value |
-|------------------|-------|
-| **Test ID**      | TC-ROT-005 |
-| **Test Name**    | Three syncs within one hour all update in place |
-| **Preconditions** | hourly.0 was just created. |
-| **Steps**        | 1. Modify source, run `incr-backup sync --level hourly`. <br>2. Modify source again, run `incr-backup sync --level hourly`. <br>3. Modify source again, run `incr-backup sync --level hourly`. |
-| **Expected Result** | - All three syncs update hourly.0 in place. <br>- No additional hourly.N slots consumed. <br>- `current/` reflects the state after the third sync. <br>- hourly.0 diff contains OLD versions of ALL files changed across all 3 syncs (accumulative within the slot). |
+| **Test ID**      | TC-SNAP-004 |
+| **Test Name**    | Rapid syncs do not overwrite previous snapshots |
+| **Preconditions** | Initialized namespace. |
+| **Steps**        | 1. Run `incr-backup sync --name snap1`. <br>2. Modify a file in source. <br>3. Run `incr-backup sync --name snap2`. |
+| **Expected Result** | - Both `diffs/snap1/` and `diffs/snap2/` exist independently. <br>- Both `.meta/manifests/snap1.json` and `.meta/manifests/snap2.json` exist. <br>- No in-place overwriting occurs. |
 | **Category**     | e2e |
 
 ---
 
-### TC-ROT-006 — Sync after minimum interval elapses
+### TC-SNAP-005 — Preserving diffs for changed and deleted files
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-ROT-006 |
-| **Test Name**    | Normal rotation resumes after interval elapses |
-| **Preconditions** | hourly.0 was created 2 hours ago. Minimum interval = 1 hour. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - Normal rotation occurs (hourly.0 → hourly.1, etc.). <br>- New hourly.0 created with fresh timestamp. |
+| **Test ID**      | TC-SNAP-005 |
+| **Test Name**    | Intermediate file states are safely preserved across snapshots |
+| **Preconditions** | Prior sync completed. |
+| **Steps**        | 1. Modify `fileA.txt` and delete `fileB.txt`. <br>2. Run `incr-backup sync`. |
+| **Expected Result** | - Pre-edit version of `fileA.txt` and deleted `fileB.txt` are preserved in the new diff directory. <br>- `current/` reflects the latest source state. |
 | **Category**     | integration |
 
 ---
 
-## 4. `sync` — Cascade Promotion
-
-### TC-CASC-001 — Daily promotion from hourly
+### TC-SNAP-006 — Dry-run preview displays snapshot target
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-CASC-001 |
-| **Test Name**    | `sync --level daily` promotes oldest hourly to daily.0 |
-| **Preconditions** | hourly.0 through hourly.5 exist. daily.0 through daily.2 exist. |
-| **Steps**        | 1. Run `incr-backup sync --level daily` |
-| **Expected Result** | - daily.2 → daily.3. <br>- daily.1 → daily.2. <br>- daily.0 → daily.1. <br>- hourly.5 (oldest) promoted to daily.0. <br>- Hourly rotation proceeds (hourly.4 → hourly.5, … hourly.0 → hourly.1). <br>- New hourly.0 created with fresh sync. <br>- Weekly/monthly slots are NOT touched. |
+| **Test ID**      | TC-SNAP-006 |
+| **Test Name**    | Sync dry-run previews snapshot target without executing changes |
+| **Preconditions** | Initialized namespace. |
+| **Steps**        | 1. Run `incr-backup sync --dry-run` |
+| **Expected Result** | - Outputs `[DRY-RUN] Would sync <source> -> <remote>/current/ with diffs to diffs/<name>`. <br>- No remote changes made. |
+| **Category**     | unit |
+
+---
+
+## 4. `sync` — Point-in-Time Integrity & Re-sync Behavior
+
+### TC-PIR-001 — Manifests track point-in-time state accurately across syncs
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-PIR-001 |
+| **Test Name**    | Manifests accurately record file metadata at each point in time |
+| **Preconditions** | Several syncs executed with varying changes. |
+| **Steps**        | 1. Read `.meta/manifests/<name>.json` for each snapshot. |
+| **Expected Result** | - Each manifest lists exact files, sizes, MD5s, and timestamps matching source at that time. |
 | **Category**     | integration |
 
 ---
 
-### TC-CASC-002 — Daily promotion deletes oldest daily at retention limit
+### TC-PIR-002 — Crash during sync resumes safely via Write-Ahead Journal
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-CASC-002 |
-| **Test Name**    | Oldest daily is deleted when daily retention is full |
-| **Preconditions** | Retention: `daily: 7`. daily.0 through daily.6 exist (full). hourly.0 through hourly.5 exist. |
-| **Steps**        | 1. Run `incr-backup sync --level daily` |
-| **Expected Result** | - daily.6 is DELETED. <br>- daily.5 → daily.6, … daily.0 → daily.1. <br>- hourly.5 → daily.0 (promoted). <br>- Hourly rotation + sync proceeds. |
+| **Test ID**      | TC-PIR-002 |
+| **Test Name**    | Incomplete sync resumes from last pending journal step |
+| **Preconditions** | Sync crashed during file transfer leaving `.meta/journal.json`. |
+| **Steps**        | 1. Run `incr-backup sync` |
+| **Expected Result** | - Detects interrupted journal. <br>- Resumes from last pending step. <br>- Completes successfully and cleans up journal. |
 | **Category**     | integration |
 
 ---
 
-### TC-CASC-003 — Weekly promotion cascades through daily and hourly
+### TC-PIR-003 — Idempotent sync resume skips already-transferred files
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-CASC-003 |
-| **Test Name**    | `sync --level weekly` cascades promotions |
-| **Preconditions** | weekly.0, weekly.1 exist. daily.0–daily.6 exist. hourly.0–hourly.5 exist. |
-| **Steps**        | 1. Run `incr-backup sync --level weekly` |
-| **Expected Result** | - weekly.1 → weekly.2. <br>- weekly.0 → weekly.1. <br>- daily.6 (oldest daily) → weekly.0 (promoted). <br>- daily.5 → daily.6, … daily.0 → daily.1. <br>- hourly.5 → daily.0 (promoted). <br>- Hourly rotation + sync. <br>- Monthly NOT touched. |
+| **Test ID**      | TC-PIR-003 |
+| **Test Name**    | Resumed sync does not re-upload identical files |
+| **Preconditions** | Half of files already transferred before interruption. |
+| **Steps**        | 1. Resume sync. |
+| **Expected Result** | - `rclone sync` compares MD5 hashes and transfers only remaining/changed files. <br>- Total bandwidth spent is minimal. |
+| **Category**     | e2e |
+
+---
+
+### TC-PIR-004 — Sync respects exclude filters
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-PIR-004 |
+| **Test Name**    | Excluded files are omitted from sync and manifests |
+| **Preconditions** | Config has `exclude = ["*.tmp", ".git/**"]`. Source contains matching files. |
+| **Steps**        | 1. Run `incr-backup sync` |
+| **Expected Result** | - Excluded files do not appear in `current/` or any snapshot manifests. |
 | **Category**     | integration |
 
 ---
 
-### TC-CASC-004 — Monthly promotion cascades through all levels
+### TC-PIR-005 — Stale lock auto-recovery during sync
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-CASC-004 |
-| **Test Name**    | `sync --level monthly` full cascade |
-| **Preconditions** | All levels have snapshots. |
-| **Steps**        | 1. Run `incr-backup sync --level monthly` |
-| **Expected Result** | - Oldest weekly → monthly.0 (with rotation of monthlies). <br>- Oldest daily → weekly.0 (with rotation of weeklies). <br>- Oldest hourly → daily.0 (with rotation of dailies). <br>- Hourly rotation + sync. |
+| **Test ID**      | TC-PIR-005 |
+| **Test Name**    | Sync breaks expired lock automatically |
+| **Preconditions** | Existing lock file older than timeout_minutes (60 min). |
+| **Steps**        | 1. Run `incr-backup sync` |
+| **Expected Result** | - Warning logged about stale lock. <br>- Lock broken and re-acquired by current process. <br>- Sync completes normally. |
 | **Category**     | integration |
 
 ---
 
-### TC-CASC-005 — Daily promotion when no hourlies exist
+### TC-PIR-006 — Manual lock break override (`--force`)
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-CASC-005 |
-| **Test Name**    | Daily sync with zero hourly snapshots |
-| **Preconditions** | No hourly snapshots exist. Only `current/` from init. |
-| **Steps**        | 1. Run `incr-backup sync --level daily` |
-| **Expected Result** | - No promotion into daily (nothing to promote). <br>- Proceeds with hourly rotation and sync normally. <br>- Creates hourly.0. <br>- Warning or info: "No hourly snapshots available for promotion to daily." |
-| **Category**     | integration |
-
----
-
-### TC-CASC-006 — Weekly promotion when no dailies exist
-
-| Field            | Value |
-|------------------|-------|
-| **Test ID**      | TC-CASC-006 |
-| **Test Name**    | Weekly sync with zero daily snapshots |
-| **Preconditions** | Hourly snapshots exist, but no daily snapshots. |
-| **Steps**        | 1. Run `incr-backup sync --level weekly` |
-| **Expected Result** | - No promotion into weekly (no dailies to promote). <br>- Daily promotion from hourly proceeds if hourlies exist. <br>- Hourly rotation + sync. <br>- Warning: "No daily snapshots available for promotion to weekly." |
+| **Test ID**      | TC-PIR-006 |
+| **Test Name**    | --force breaks active lock |
+| **Preconditions** | Active non-stale lock exists on remote. |
+| **Steps**        | 1. Run `incr-backup sync --force` |
+| **Expected Result** | - Active lock is forcefully broken. <br>- New lock acquired. <br>- Sync proceeds to completion. |
 | **Category**     | integration |
 
 ---
@@ -523,10 +523,10 @@
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-LIST-001 |
-| **Test Name**    | List displays all retained snapshots |
-| **Preconditions** | Multiple snapshots at various levels: hourly.0–2, daily.0–1, weekly.0, monthly.0. |
+| **Test Name**    | List displays all snapshots |
+| **Preconditions** | Multiple snapshots exist (e.g. `2026-10-28T08-00Z`, `2026-10-28T07-00Z`, `daily-2026-10-27`). |
 | **Steps**        | 1. Run `incr-backup list` |
-| **Expected Result** | - Output shows all snapshots grouped by level. <br>- Each entry shows: slot name, timestamp, number of files, total size. <br>- Order: most recent first within each level. <br>- `current` is listed as a special entry at the top. |
+| **Expected Result** | - Output shows all snapshots sorted chronologically. <br>- Each entry shows: snapshot name, timestamp, number of files, total size. <br>- `current` is listed as a special entry at the top. |
 | **Category**     | e2e |
 
 ---
@@ -550,9 +550,9 @@
 |------------------|-------|
 | **Test ID**      | TC-LIST-003 |
 | **Test Name**    | JSON-formatted list output |
-| **Preconditions** | Snapshots exist at multiple levels. |
+| **Preconditions** | Snapshots exist. |
 | **Steps**        | 1. Run `incr-backup list --json` |
-| **Expected Result** | - Valid JSON array output. <br>- Each object has `level`, `slot`, `timestamp`, `file_count`, `total_size`. <br>- Parseable by `jq`. |
+| **Expected Result** | - Valid JSON array output. <br>- Each object has `name`, `timestamp`, `file_count`, `total_size`. <br>- Parseable by `jq`. |
 | **Category**     | e2e |
 
 ---
@@ -567,7 +567,7 @@
 | **Test Name**    | Status displays remote space usage breakdown |
 | **Preconditions** | Multiple syncs completed with data in `current/` and `diffs/`. |
 | **Steps**        | 1. Run `incr-backup status` |
-| **Expected Result** | - Output shows: <br>  - Total remote usage. <br>  - `current/` size. <br>  - `diffs/` size (broken down by level). <br>  - `.meta/` size. <br>  - Retention policy summary. <br>  - Last sync time. <br>  - Lock status (locked/unlocked). |
+| **Expected Result** | - Output shows: <br>  - Total remote usage. <br>  - `current/` size. <br>  - `diffs/` size. <br>  - `.meta/` size. <br>  - Last sync time. <br>  - Lock status (locked/unlocked). |
 | **Category**     | e2e |
 
 ---
@@ -613,28 +613,28 @@
 
 ---
 
-### TC-REST-002 — Restore a historical hourly snapshot
+### TC-REST-002 — Restore a historical snapshot
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-REST-002 |
-| **Test Name**    | Restore hourly.2 from diffs |
-| **Preconditions** | hourly.0 through hourly.4 exist. `/tmp/restore` is empty. |
-| **Steps**        | 1. Run `incr-backup restore hourly.2 --to /tmp/restore` |
-| **Expected Result** | - Tool reads hourly.2's manifest to get the file list. <br>- For each file: looks in the earliest diff directory AFTER hourly.2 (i.e., hourly.1, hourly.0) for old versions, or uses `current/` if unchanged. <br>- All files downloaded to `/tmp/restore` matching hourly.2's state. <br>- md5 hashes of restored files match manifest entries. |
+| **Test Name**    | Restore snapshot from diffs |
+| **Preconditions** | `snap1`, `snap2`, `snap3` exist. `/tmp/restore` is empty. |
+| **Steps**        | 1. Run `incr-backup restore snap1 --to /tmp/restore` |
+| **Expected Result** | - Tool reads snap1's manifest to get the file list. <br>- For each file: looks in diff directories created AFTER snap1 (e.g. `snap2`, `snap3`) for old versions, or uses `current/` if unchanged. <br>- All files downloaded to `/tmp/restore` matching snap1's state. <br>- md5 hashes of restored files match manifest entries. |
 | **Category**     | e2e |
 
 ---
 
-### TC-REST-003 — Restore oldest monthly snapshot
+### TC-REST-003 — Restore oldest snapshot
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-REST-003 |
 | **Test Name**    | Restore the oldest available snapshot |
-| **Preconditions** | monthly.11 is the oldest snapshot. |
-| **Steps**        | 1. Run `incr-backup restore monthly.11 --to /tmp/restore` |
-| **Expected Result** | - File resolution searches through all diff directories from monthly.11 forward to current. <br>- Complete restoration of monthly.11's state. <br>- All hashes validated. |
+| **Preconditions** | `oldest-snap` is the earliest snapshot. |
+| **Steps**        | 1. Run `incr-backup restore oldest-snap --to /tmp/restore` |
+| **Expected Result** | - File resolution searches through all diff directories created after `oldest-snap` forward to current. <br>- Complete restoration of `oldest-snap` state. <br>- All hashes validated. |
 | **Category**     | e2e |
 
 ---
@@ -645,8 +645,8 @@
 |------------------|-------|
 | **Test ID**      | TC-REST-004 |
 | **Test Name**    | Restore a single file from a snapshot |
-| **Preconditions** | hourly.1 exists with manifest containing `docs/report.pdf`. |
-| **Steps**        | 1. Run `incr-backup restore hourly.1 --to /tmp/restore --path docs/report.pdf` |
+| **Preconditions** | `snap1` exists with manifest containing `docs/report.pdf`. |
+| **Steps**        | 1. Run `incr-backup restore snap1 --to /tmp/restore --path docs/report.pdf` |
 | **Expected Result** | - Only `docs/report.pdf` is restored to `/tmp/restore/docs/report.pdf`. <br>- No other files downloaded. <br>- Hash matches manifest. |
 | **Category**     | e2e |
 
@@ -658,8 +658,8 @@
 |------------------|-------|
 | **Test ID**      | TC-REST-005 |
 | **Test Name**    | Restore an entire subdirectory from a snapshot |
-| **Preconditions** | hourly.1 manifest contains files under `photos/2026/`. |
-| **Steps**        | 1. Run `incr-backup restore hourly.1 --to /tmp/restore --path photos/2026/` |
+| **Preconditions** | `snap1` manifest contains files under `photos/2026/`. |
+| **Steps**        | 1. Run `incr-backup restore snap1 --to /tmp/restore --path photos/2026/` |
 | **Expected Result** | - All files under `photos/2026/` in that snapshot are restored. <br>- Directory structure preserved. <br>- Files outside `photos/2026/` are not downloaded. |
 | **Category**     | e2e |
 
@@ -672,7 +672,7 @@
 | **Test ID**      | TC-REST-006 |
 | **Test Name**    | Restore refuses to overwrite existing files without --overwrite |
 | **Preconditions** | `/tmp/restore` already contains files. |
-| **Steps**        | 1. Run `incr-backup restore hourly.0 --to /tmp/restore` |
+| **Steps**        | 1. Run `incr-backup restore snap1 --to /tmp/restore` |
 | **Expected Result** | - Exit code non-zero. <br>- Error: "Target directory `/tmp/restore` is not empty. Use `--overwrite` to replace existing files." |
 | **Category**     | e2e |
 
@@ -684,9 +684,9 @@
 |------------------|-------|
 | **Test ID**      | TC-REST-007 |
 | **Test Name**    | Restore a snapshot that doesn't exist |
-| **Preconditions** | Only hourly.0–hourly.2 exist. |
-| **Steps**        | 1. Run `incr-backup restore hourly.5 --to /tmp/restore` |
-| **Expected Result** | - Exit code non-zero. <br>- Error: "Snapshot `hourly.5` does not exist. Run `incr-backup list` to see available snapshots." |
+| **Preconditions** | Only `snap1` and `snap2` exist. |
+| **Steps**        | 1. Run `incr-backup restore non-existent-snap --to /tmp/restore` |
+| **Expected Result** | - Exit code non-zero. <br>- Error: "Snapshot `non-existent-snap` does not exist. Run `incr-backup list` to see available snapshots." |
 | **Category**     | e2e |
 
 ---
@@ -697,50 +697,50 @@
 |------------------|-------|
 | **Test ID**      | TC-REST-008 |
 | **Test Name**    | File resolution correctly chooses diff or current source |
-| **Preconditions** | - hourly.2 manifest lists `file_A.txt` (md5 = `aaa`). <br>- `file_A.txt` was modified after hourly.2, so its old version (md5 = `aaa`) is in `diffs/hourly.1/`. <br>- `current/file_A.txt` has md5 = `bbb` (newer). <br>- hourly.2 manifest also lists `file_B.txt` (md5 = `ccc`), which hasn't changed — it's in `current/` with md5 = `ccc`. |
-| **Steps**        | 1. Run `incr-backup restore hourly.2 --to /tmp/restore` |
-| **Expected Result** | - `file_A.txt` is sourced from `diffs/hourly.1/` (md5 `aaa`). <br>- `file_B.txt` is sourced from `current/` (md5 `ccc`). <br>- Both files match hourly.2 manifest hashes. |
+| **Preconditions** | - `snap1` manifest lists `file_A.txt` (md5 = `aaa`). <br>- `file_A.txt` was modified after `snap1`, so its old version (md5 = `aaa`) is in `diffs/snap2/`. <br>- `current/file_A.txt` has md5 = `bbb` (newer). <br>- `snap1` manifest also lists `file_B.txt` (md5 = `ccc`), which hasn't changed — it's in `current/` with md5 = `ccc`. |
+| **Steps**        | 1. Run `incr-backup restore snap1 --to /tmp/restore` |
+| **Expected Result** | - `file_A.txt` is sourced from `diffs/snap2/` (md5 `aaa`). <br>- `file_B.txt` is sourced from `current/` (md5 `ccc`). <br>- Both files match snap1 manifest hashes. |
 | **Category**     | integration |
 
 ---
 
 ## 8. `diff` Command
 
-### TC-DIFF-001 — Diff between two adjacent hourly snapshots
+### TC-DIFF-001 — Diff between two discrete snapshots
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-DIFF-001 |
-| **Test Name**    | Diff shows changes between hourly.0 and hourly.1 |
-| **Preconditions** | hourly.0 and hourly.1 exist with different manifests. |
-| **Steps**        | 1. Run `incr-backup diff hourly.1 hourly.0` |
-| **Expected Result** | - Output lists: <br>  - **Added** files (in hourly.0 but not hourly.1). <br>  - **Deleted** files (in hourly.1 but not hourly.0). <br>  - **Modified** files (same path, different md5/size). <br>- Counts displayed: "3 added, 1 deleted, 2 modified." |
+| **Test Name**    | Diff shows changes between snap1 and snap2 |
+| **Preconditions** | `snap1` and `snap2` exist with different manifests. |
+| **Steps**        | 1. Run `incr-backup diff snap1 snap2` |
+| **Expected Result** | - Output lists: <br>  - **Added** files (in snap2 but not snap1). <br>  - **Deleted** files (in snap1 but not snap2). <br>  - **Modified** files (same path, different md5/size). <br>- Counts displayed: "3 added, 1 deleted, 2 modified." |
 | **Category**     | e2e |
 
 ---
 
-### TC-DIFF-002 — Diff between current and itself
+### TC-DIFF-002 — Diff between a snapshot and itself
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-DIFF-002 |
 | **Test Name**    | Diff of a snapshot with itself is empty |
-| **Preconditions** | hourly.0 exists. |
-| **Steps**        | 1. Run `incr-backup diff hourly.0 hourly.0` |
+| **Preconditions** | `snap1` exists. |
+| **Steps**        | 1. Run `incr-backup diff snap1 snap1` |
 | **Expected Result** | - Output: "No differences." <br>- Zero added, deleted, or modified files. |
 | **Category**     | unit |
 
 ---
 
-### TC-DIFF-003 — Diff between different levels
+### TC-DIFF-003 — Diff between timestamped and consolidated snapshots
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-DIFF-003 |
-| **Test Name**    | Diff between a daily and a weekly snapshot |
-| **Preconditions** | daily.0 and weekly.0 both exist with manifests. |
-| **Steps**        | 1. Run `incr-backup diff weekly.0 daily.0` |
-| **Expected Result** | - Correctly compares manifests regardless of level. <br>- Shows all added/deleted/modified files between the two points in time. |
+| **Test Name**    | Diff between a timestamped and a consolidated snapshot |
+| **Preconditions** | Timestamped snapshot and consolidated snapshot both exist with manifests. |
+| **Steps**        | 1. Run `incr-backup diff 2026-10-28T08-00Z daily-2026-10-27` |
+| **Expected Result** | - Correctly compares manifests. <br>- Shows all added/deleted/modified files between the two points in time. |
 | **Category**     | e2e |
 
 ---
@@ -751,9 +751,9 @@
 |------------------|-------|
 | **Test ID**      | TC-DIFF-004 |
 | **Test Name**    | Diff a historical snapshot against current |
-| **Preconditions** | hourly.2 and current (latest manifest) exist. |
-| **Steps**        | 1. Run `incr-backup diff hourly.2 current` |
-| **Expected Result** | - Shows all changes between hourly.2 and the current state. <br>- Useful for seeing "what changed since that snapshot." |
+| **Preconditions** | `snap1` and `current` (latest manifest) exist. |
+| **Steps**        | 1. Run `incr-backup diff snap1 current` |
+| **Expected Result** | - Shows all changes between snap1 and the current state. <br>- Useful for seeing "what changed since that snapshot." |
 | **Category**     | e2e |
 
 ---
@@ -765,7 +765,7 @@
 | **Test ID**      | TC-DIFF-005 |
 | **Test Name**    | JSON-formatted diff output |
 | **Preconditions** | Two snapshots exist. |
-| **Steps**        | 1. Run `incr-backup diff hourly.1 hourly.0 --json` |
+| **Steps**        | 1. Run `incr-backup diff snap1 snap2 --json` |
 | **Expected Result** | - Valid JSON with `added`, `deleted`, `modified` arrays. <br>- Each entry has `path`, `size_a`, `size_b`, `md5_a`, `md5_b` (where applicable). |
 | **Category**     | e2e |
 
@@ -777,9 +777,9 @@
 |------------------|-------|
 | **Test ID**      | TC-DIFF-006 |
 | **Test Name**    | Diff references a snapshot that doesn't exist |
-| **Preconditions** | hourly.0 exists, weekly.5 does not. |
-| **Steps**        | 1. Run `incr-backup diff hourly.0 weekly.5` |
-| **Expected Result** | - Exit code non-zero. <br>- Error: "Snapshot `weekly.5` does not exist." |
+| **Preconditions** | `snap1` exists, `snap99` does not. |
+| **Steps**        | 1. Run `incr-backup diff snap1 snap99` |
+| **Expected Result** | - Exit code non-zero. <br>- Error: "Snapshot `snap99` does not exist." |
 | **Category**     | e2e |
 
 ---
@@ -830,9 +830,9 @@
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-VERI-004 |
-| **Test Name**    | Verify hourly.2 checks files across diffs and current |
-| **Preconditions** | hourly.2 exists. Its manifest references files in diffs/ and current/. |
-| **Steps**        | 1. Run `incr-backup verify hourly.2` |
+| **Test Name**    | Verify snap1 checks files across diffs and current |
+| **Preconditions** | `snap1` exists. Its manifest references files in diffs/ and current/. |
+| **Steps**        | 1. Run `incr-backup verify snap1` |
 | **Expected Result** | - Resolves file locations (same logic as restore). <br>- Checks existence and hash for each file. <br>- Reports results. |
 | **Category**     | e2e |
 
@@ -860,7 +860,7 @@
 | **Test ID**      | TC-LOCK-001 |
 | **Test Name**    | Second sync fails while first is running |
 | **Preconditions** | First `incr-backup sync` is currently in progress (lock held). |
-| **Steps**        | 1. In a second terminal, run `incr-backup sync --level hourly` |
+| **Steps**        | 1. In a second terminal, run `incr-backup sync` |
 | **Expected Result** | - Exit code non-zero. <br>- Error: "Another operation is in progress (locked by PID XXXX on host YYYY at TIME). Use `--force` to break the lock if you believe this is stale." <br>- No data corruption. |
 | **Category**     | e2e |
 
@@ -873,7 +873,7 @@
 | **Test ID**      | TC-LOCK-002 |
 | **Test Name**    | Force-break a stale lock |
 | **Preconditions** | Lock file exists but is older than timeout (1 hour). The process that created it has crashed. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly --force` |
+| **Steps**        | 1. Run `incr-backup sync --force` |
 | **Expected Result** | - Warning: "Breaking stale lock (age: Xh Ym, created by PID XXXX on host YYYY)." <br>- Old lock removed, new lock acquired. <br>- Checks journal for interrupted operation and attempts resume/cleanup. <br>- Sync proceeds normally. |
 | **Category**     | e2e |
 
@@ -886,7 +886,7 @@
 | **Test ID**      | TC-LOCK-003 |
 | **Test Name**    | Recent lock cannot be broken without --force |
 | **Preconditions** | Lock file exists and is 10 minutes old (within timeout). |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` (without --force) |
+| **Steps**        | 1. Run `incr-backup sync` (without --force) |
 | **Expected Result** | - Exit code non-zero. <br>- Error includes lock age and suggests waiting or using `--force`. |
 | **Category**     | integration |
 
@@ -912,7 +912,7 @@
 | **Test ID**      | TC-LOCK-005 |
 | **Test Name**    | Configurable lock timeout is respected |
 | **Preconditions** | Config sets `lock_timeout_minutes: 30`. Lock is 45 minutes old. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly --force` |
+| **Steps**        | 1. Run `incr-backup sync --force` |
 | **Expected Result** | - Lock is considered stale (45 min > 30 min timeout). <br>- Warning and break proceeds as in TC-LOCK-002. |
 | **Category**     | integration |
 
@@ -927,60 +927,47 @@
 | **Test ID**      | TC-JOUR-001 |
 | **Test Name**    | Journal records each phase of sync |
 | **Preconditions** | None. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly`. <br>2. Inspect `.meta/journal.json` during execution (or from logs). |
-| **Expected Result** | - Journal entries include: `lock_acquired`, `rotation_started`, `rotation_complete`, `sync_started`, `sync_complete`, `manifest_generated`, `manifest_uploaded`, `lock_released`. <br>- After successful completion, journal is in clean/empty state. |
+| **Steps**        | 1. Run `incr-backup sync`. <br>2. Inspect `.meta/journal.json` during execution (or from logs). |
+| **Expected Result** | - Journal entries include: `acquire_lock`, `rclone_sync`, `generate_manifest`, `upload_manifest`, `cleanup_journal`, `release_lock`. <br>- After successful completion, journal is removed. |
 | **Category**     | integration |
 
 ---
 
-### TC-JOUR-002 — Resume after interruption during rotation
+### TC-JOUR-002 — Resume after interruption during rclone sync
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-JOUR-002 |
-| **Test Name**    | Crash during rotation phase, resume on next run |
-| **Preconditions** | Simulate crash after `rotation_started` but before `rotation_complete` (e.g., kill process). |
-| **Steps**        | 1. Force-start a new sync with `--force` (breaking stale lock). |
-| **Expected Result** | - Tool reads journal, sees incomplete rotation. <br>- Either rolls back the partial rotation or completes it. <br>- Proceeds with full sync. <br>- No duplicate or lost snapshots. |
-| **Category**     | e2e |
-
----
-
-### TC-JOUR-003 — Resume after interruption during rclone sync
-
-| Field            | Value |
-|------------------|-------|
-| **Test ID**      | TC-JOUR-003 |
 | **Test Name**    | Crash during rclone sync phase |
-| **Preconditions** | Simulate crash during `rclone sync` (mid-transfer). Journal shows `sync_started`. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly --force` |
+| **Preconditions** | Simulate crash during `rclone sync` (mid-transfer). Journal shows `rclone_sync`. |
+| **Steps**        | 1. Run `incr-backup sync --force` |
 | **Expected Result** | - Tool reads journal, sees sync was interrupted. <br>- Re-runs `rclone sync` from scratch (rclone handles its own idempotency). <br>- Manifest generated from final state. <br>- No data loss. |
 | **Category**     | e2e |
 
 ---
 
-### TC-JOUR-004 — Resume after interruption during manifest upload
+### TC-JOUR-003 — Resume after interruption during manifest upload
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-JOUR-004 |
+| **Test ID**      | TC-JOUR-003 |
 | **Test Name**    | Crash after manifest generated but before upload |
-| **Preconditions** | Journal shows `manifest_generated` but not `manifest_uploaded`. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly --force` |
-| **Expected Result** | - Tool re-generates manifest (or re-uploads the generated one). <br>- Does not re-run rotation or sync. <br>- Completes cleanly. |
+| **Preconditions** | Journal shows `generate_manifest` done but `upload_manifest` pending. |
+| **Steps**        | 1. Run `incr-backup sync --force` |
+| **Expected Result** | - Tool re-generates manifest (or re-uploads the generated one). <br>- Completes cleanly. |
 | **Category**     | e2e |
 
 ---
 
-### TC-JOUR-005 — Clean journal after successful operation
+### TC-JOUR-004 — Clean journal after successful operation
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-JOUR-005 |
+| **Test ID**      | TC-JOUR-004 |
 | **Test Name**    | Journal is clean after successful sync |
 | **Preconditions** | None. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly`. <br>2. Read `.meta/journal.json`. |
-| **Expected Result** | - Journal contains no in-progress operations. <br>- State is `idle` or file is empty/minimal. |
+| **Steps**        | 1. Run `incr-backup sync`. <br>2. Read `.meta/journal.json`. |
+| **Expected Result** | - Journal file is removed after successful completion. |
 | **Category**     | integration |
 
 ---
@@ -994,7 +981,7 @@
 | **Test ID**      | TC-ERR-001 |
 | **Test Name**    | Sync when source directory has been removed |
 | **Preconditions** | Initialized namespace. Source directory `/home/user/docs` no longer exists. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `incr-backup sync` |
 | **Expected Result** | - Exit code non-zero. <br>- Error: "Source directory `/home/user/docs` does not exist." <br>- No lock left behind. No partial state. |
 | **Category**     | e2e |
 
@@ -1007,8 +994,8 @@
 | **Test ID**      | TC-ERR-002 |
 | **Test Name**    | Tool handles corrupted manifest gracefully |
 | **Preconditions** | Manually corrupt a manifest file on remote (write invalid JSON). |
-| **Steps**        | 1. Run `incr-backup verify` <br>2. Run `incr-backup restore hourly.0 --to /tmp/restore` (if hourly.0's manifest is corrupt) |
-| **Expected Result** | - `verify`: Reports "Manifest for hourly.0 is corrupted: invalid JSON at byte X." <br>- `restore`: Fails with clear error rather than panic. <br>- Suggests: "Run `incr-backup sync` to regenerate the current manifest." |
+| **Steps**        | 1. Run `incr-backup verify` <br>2. Run `incr-backup restore snap1 --to /tmp/restore` (if snap1's manifest is corrupt) |
+| **Expected Result** | - `verify`: Reports "Manifest for snap1 is corrupted: invalid JSON at byte X." <br>- `restore`: Fails with clear error rather than panic. <br>- Suggests: "Run `incr-backup sync` to regenerate the current manifest." |
 | **Category**     | integration |
 
 ---
@@ -1046,7 +1033,7 @@
 | **Test ID**      | TC-ERR-005 |
 | **Test Name**    | rclone subprocess failure is handled |
 | **Preconditions** | Simulate rclone failure (e.g., auth error during sync). |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `incr-backup sync` |
 | **Expected Result** | - incr-backup captures rclone's stderr. <br>- Error: "rclone sync failed (exit code X): <rclone stderr>". <br>- Journal records the failure. Lock is released. <br>- No manifest generated (sync didn't complete). |
 | **Category**     | integration |
 
@@ -1059,7 +1046,7 @@
 | **Test ID**      | TC-ERR-006 |
 | **Test Name**    | Sync when Google Drive storage is full |
 | **Preconditions** | Google Drive account is at storage quota. |
-| **Steps**        | 1. Add new files to source. <br>2. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Add new files to source. <br>2. Run `incr-backup sync` |
 | **Expected Result** | - rclone fails with quota error. <br>- incr-backup reports: "Remote storage quota exceeded. Free up space or upgrade storage." <br>- Lock released. Journal reflects failure. |
 | **Category**     | e2e |
 
@@ -1085,8 +1072,8 @@
 | **Test ID**      | TC-ERR-008 |
 | **Test Name**    | System clock jumps backward between syncs |
 | **Preconditions** | Last sync timestamp is T. System clock is set to T - 2 hours. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - Warning: "System clock appears to have moved backward. Last sync was at T, current time is T-2h." <br>- Sync proceeds (using current system time for the new snapshot). <br>- Minimum interval check handles this gracefully (does not skip rotation incorrectly). |
+| **Steps**        | 1. Run `incr-backup sync` |
+| **Expected Result** | - Warning: "System clock appears to have moved backward. Last sync was at T, current time is T-2h." <br>- Sync proceeds (using current system time for the new snapshot). <br>- Append-only snapshot created cleanly. |
 | **Category**     | integration |
 
 ---
@@ -1098,10 +1085,10 @@
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-CONF-001 |
-| **Test Name**    | Override retention via env var |
-| **Preconditions** | Config has `hourly: 6`. |
-| **Steps**        | 1. Run `INCR_BACKUP_HOURLY=12 incr-backup sync --level hourly` |
-| **Expected Result** | - Hourly retention of 12 is used for this run. <br>- Config file on remote is NOT modified (env override is transient). |
+| **Test Name**    | Override source path via env var |
+| **Preconditions** | Config has `source = "/home/user/docs"`. |
+| **Steps**        | 1. Run `INCR_BACKUP_SOURCE=/home/user/other-docs incr-backup sync` |
+| **Expected Result** | - Source path `/home/user/other-docs` is used for this run. <br>- Config file is NOT modified (env override is transient). |
 | **Category**     | integration |
 
 ---
@@ -1126,7 +1113,7 @@
 | **Test ID**      | TC-CONF-003 |
 | **Test Name**    | Custom rclone binary path |
 | **Preconditions** | rclone installed at `/opt/rclone/rclone`. |
-| **Steps**        | 1. Run `INCR_BACKUP_RCLONE=/opt/rclone/rclone incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `INCR_BACKUP_RCLONE=/opt/rclone/rclone incr-backup sync` |
 | **Expected Result** | - Tool uses the specified rclone binary. <br>- Sync succeeds if the binary is valid. |
 | **Category**     | integration |
 
@@ -1152,21 +1139,21 @@
 | **Test ID**      | TC-CONF-005 |
 | **Test Name**    | Custom lock timeout in config |
 | **Preconditions** | Config has `lock_timeout_minutes: 15`. |
-| **Steps**        | 1. Create a lock that is 20 minutes old. <br>2. Run `incr-backup sync --level hourly --force` |
+| **Steps**        | 1. Create a lock that is 20 minutes old. <br>2. Run `incr-backup sync --force` |
 | **Expected Result** | - Lock is considered stale at 20 min (> 15 min configured timeout). <br>- Lock broken and sync proceeds. |
 | **Category**     | integration |
 
 ---
 
-### TC-CONF-006 — Override minimum sync interval
+### TC-CONF-006 — Override timezone via environment variable
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-CONF-006 |
-| **Test Name**    | Custom minimum interval between rotations |
-| **Preconditions** | Config has `min_interval_minutes: 30`. hourly.0 is 35 minutes old. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
-| **Expected Result** | - Rotation occurs (35 min > 30 min minimum). <br>- With default (60 min), this would have been an in-place update. |
+| **Test Name**    | Custom timezone via INCR_BACKUP_TIMEZONE |
+| **Preconditions** | Config has `timezone = "utc"`. |
+| **Steps**        | 1. Run `INCR_BACKUP_TIMEZONE=local incr-backup sync` |
+| **Expected Result** | - Snapshot name is formatted with local offset (e.g. `+0530`) instead of `Z`. |
 | **Category**     | integration |
 
 ---
@@ -1178,7 +1165,7 @@
 | **Test ID**      | TC-CONF-007 |
 | **Test Name**    | Timezone indicator in snapshot directory names (UTC vs Local) |
 | **Preconditions** | Initialized backup repository. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly --timezone local` <br>2. Run `incr-backup sync --level hourly --tz utc --force-rotate` |
+| **Steps**        | 1. Run `incr-backup sync --timezone local` <br>2. Run `incr-backup sync --tz utc` |
 | **Expected Result** | - Step 1 creates snapshot ending with numeric offset `+HHMM` or `-HHMM` without colons `:` <br>- Step 2 creates snapshot ending with `Z` (UTC designator). |
 | **Category**     | integration |
 
@@ -1191,7 +1178,7 @@
 | **Test ID**      | TC-CONF-008 |
 | **Test Name**    | TOML configuration timezone parsing flexibility |
 | **Preconditions** | Valid source directory and remote path. |
-| **Steps**        | 1. Test `timezone = "local"` at root level. <br>2. Test `timezone = "local"` after `[remote]` or `[retention]` table headers. <br>3. Test `[snapshot]` section with `timezone = "local"`. <br>4. Test unquoted `timezone = local` and `timezone=local`. |
+| **Steps**        | 1. Test `timezone = "local"` at root level. <br>2. Test `timezone = "local"` after `[remote]` or `[source]` table headers. <br>3. Test `[snapshot]` section with `timezone = "local"`. <br>4. Test unquoted `timezone = local` and `timezone=local`. |
 | **Expected Result** | - In all cases, `Config::load` parses `timezone` as `SnapshotTimezone::Local` without failing TOML syntax validation or defaulting to UTC. |
 | **Category**     | unit, integration |
 
@@ -1206,7 +1193,7 @@
 | **Test ID**      | TC-FS-001 |
 | **Test Name**    | Sync handles filenames with spaces |
 | **Preconditions** | Source contains `my document (final).docx`. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` <br>2. Run `incr-backup verify current` |
+| **Steps**        | 1. Run `incr-backup sync` <br>2. Run `incr-backup verify current` |
 | **Expected Result** | - File synced to `current/my document (final).docx`. <br>- Manifest entry path preserved exactly. <br>- Verify confirms hash match. |
 | **Category**     | e2e |
 
@@ -1219,7 +1206,7 @@
 | **Test ID**      | TC-FS-002 |
 | **Test Name**    | Sync handles unicode filenames |
 | **Preconditions** | Source contains `日本語ファイル.txt`, `café_résumé.pdf`, `файл_документ.doc`. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` <br>2. Run `incr-backup verify current` <br>3. Run `incr-backup restore current --to /tmp/restore` |
+| **Steps**        | 1. Run `incr-backup sync` <br>2. Run `incr-backup verify current` <br>3. Run `incr-backup restore current --to /tmp/restore` |
 | **Expected Result** | - All files synced with correct names. <br>- Manifest correctly encodes unicode paths (UTF-8). <br>- Restore produces correct filenames. |
 | **Category**     | e2e |
 
@@ -1232,7 +1219,7 @@
 | **Test ID**      | TC-FS-003 |
 | **Test Name**    | Filenames with characters special to shells/GDrive |
 | **Preconditions** | Source contains files named: `file#1.txt`, `report[2026].pdf`, `notes & ideas.md`, `100%.txt`. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `incr-backup sync` |
 | **Expected Result** | - All files synced correctly. <br>- rclone subprocess arguments properly escaped. <br>- Manifest paths are exact. |
 | **Category**     | e2e |
 
@@ -1245,7 +1232,7 @@
 | **Test ID**      | TC-FS-004 |
 | **Test Name**    | Symlinks handled according to rclone behavior |
 | **Preconditions** | Source contains a symlink `link.txt → ../other/real.txt`. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `incr-backup sync` |
 | **Expected Result** | - Follows rclone's default behavior (typically follows symlinks and copies the target file). <br>- If rclone skips symlinks, incr-backup logs a warning. <br>- No crashes or panics. |
 | **Category**     | e2e |
 
@@ -1258,7 +1245,7 @@
 | **Test ID**      | TC-FS-005 |
 | **Test Name**    | Unreadable files in source |
 | **Preconditions** | Source contains a file with `chmod 000` (no read permission). |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `incr-backup sync` |
 | **Expected Result** | - rclone reports permission denied for that file. <br>- incr-backup logs the error but continues syncing other files (rclone's `--ignore-errors` or similar). <br>- Exit code indicates partial failure. <br>- Manifest does not include the unreadable file (or marks it as errored). |
 | **Category**     | e2e |
 
@@ -1271,7 +1258,7 @@
 | **Test ID**      | TC-FS-006 |
 | **Test Name**    | Sync a file larger than Google Drive's chunked upload threshold |
 | **Preconditions** | Source contains a 6GB file. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `incr-backup sync` |
 | **Expected Result** | - rclone handles chunked upload automatically. <br>- File appears in `current/` with correct md5. <br>- Manifest records correct size (> 5GB). <br>- If interrupted mid-upload, journal enables resume. |
 | **Category**     | e2e |
 
@@ -1284,7 +1271,7 @@
 | **Test ID**      | TC-FS-007 |
 | **Test Name**    | Sync handles zero-byte files |
 | **Preconditions** | Source contains `empty.txt` (0 bytes). |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `incr-backup sync` |
 | **Expected Result** | - File synced to `current/`. <br>- Manifest entry has `size: 0` and valid md5 (`d41d8cd98f00b204e9800998ecf8427e`). |
 | **Category**     | e2e |
 
@@ -1297,7 +1284,7 @@
 | **Test ID**      | TC-FS-008 |
 | **Test Name**    | Sync handles deeply nested paths |
 | **Preconditions** | Source has a file at depth 20: `a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/file.txt`. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` <br>2. Run `incr-backup restore current --to /tmp/restore` |
+| **Steps**        | 1. Run `incr-backup sync` <br>2. Run `incr-backup restore current --to /tmp/restore` |
 | **Expected Result** | - Full path preserved in `current/` and manifest. <br>- Restore recreates the full directory hierarchy. |
 | **Category**     | e2e |
 
@@ -1310,7 +1297,7 @@
 | **Test ID**      | TC-FS-009 |
 | **Test Name**    | File with name near filesystem/GDrive limits |
 | **Preconditions** | Source has a file with a 200+ character filename. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `incr-backup sync` |
 | **Expected Result** | - If rclone can handle it, file synced normally. <br>- If GDrive rejects it, error reported clearly. <br>- No panic or data corruption. |
 | **Category**     | e2e |
 
@@ -1323,7 +1310,7 @@
 | **Test ID**      | TC-FS-010 |
 | **Test Name**    | Performance with many small files |
 | **Preconditions** | Source contains 50,000 small files (1KB each). |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` <br>2. Run `incr-backup verify current` |
+| **Steps**        | 1. Run `incr-backup sync` <br>2. Run `incr-backup verify current` |
 | **Expected Result** | - Sync completes successfully (may take time). <br>- Manifest has 50,000 entries and is valid. <br>- Verify completes without error. <br>- `rclone lsjson --recursive` handles the volume. |
 | **Category**     | e2e |
 
@@ -1336,7 +1323,7 @@
 | **Test ID**      | TC-FS-011 |
 | **Test Name**    | Sync includes hidden files |
 | **Preconditions** | Source contains `.gitignore`, `.env`, `.ssh/config`. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` |
+| **Steps**        | 1. Run `incr-backup sync` |
 | **Expected Result** | - Hidden files and directories synced to `current/`. <br>- Manifest includes dotfile entries. |
 | **Category**     | e2e |
 
@@ -1344,15 +1331,15 @@
 
 ## 15. Network & Remote Failures
 
-### TC-NET-001 — Network interruption during rotation
+### TC-NET-001 — Network interruption during sync
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-NET-001 |
-| **Test Name**    | Network drops during snapshot rotation phase |
-| **Preconditions** | Simulate network failure (e.g., disconnect WiFi) during rotation. |
-| **Steps**        | 1. Start `incr-backup sync --level hourly`. <br>2. Kill network during rotation. <br>3. Restore network. <br>4. Run `incr-backup sync --level hourly --force`. |
-| **Expected Result** | - First run fails with network error. Lock and journal left on remote. <br>- Second run (with --force) reads journal, detects incomplete rotation. <br>- Cleanup/resume succeeds. <br>- Final state is consistent. |
+| **Test Name**    | Network drops during sync execution |
+| **Preconditions** | Simulate network failure (e.g., disconnect WiFi) during sync. |
+| **Steps**        | 1. Start `incr-backup sync`. <br>2. Kill network during file transfer. <br>3. Restore network. <br>4. Run `incr-backup sync --force`. |
+| **Expected Result** | - First run fails with network error. Lock and journal left on remote. <br>- Second run (with --force) reads journal, detects incomplete sync step. <br>- Cleanup/resume succeeds. <br>- Final state is consistent. |
 | **Category**     | e2e |
 
 ---
@@ -1390,7 +1377,7 @@
 | **Test ID**      | TC-NET-004 |
 | **Test Name**    | Transient network errors are retried |
 | **Preconditions** | Network is flaky (packet loss). |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` with `--retries 5` (or rclone's default retries). |
+| **Steps**        | 1. Run `incr-backup sync` with `--retries 5` (or rclone's default retries). |
 | **Expected Result** | - rclone retries failed transfers automatically. <br>- incr-backup does not abort on first rclone retry. <br>- Sync eventually completes if network stabilizes. |
 | **Category**     | e2e |
 
@@ -1418,7 +1405,7 @@
 | **Test ID**      | TC-NS-001 |
 | **Test Name**    | Independent backups coexist on same remote |
 | **Preconditions** | Two namespaces initialized: `gdrive:backups/host_a` and `gdrive:backups/host_b`. |
-| **Steps**        | 1. Run `incr-backup sync --level hourly` for host_a. <br>2. Run `incr-backup sync --level hourly` for host_b. |
+| **Steps**        | 1. Run `incr-backup sync` for host_a. <br>2. Run `incr-backup sync` for host_b. |
 | **Expected Result** | - Each namespace has independent `current/`, `diffs/`, `.meta/`. <br>- Operations on host_a do not affect host_b and vice versa. <br>- Locks are per-namespace. <br>- Manifests are independent. |
 | **Category**     | e2e |
 
@@ -1471,7 +1458,7 @@
 |------------------|-------|
 | **Test ID**      | TC-REM-001 |
 | **Test Name**    | Purge single file across current and all past diff snapshots and manifests |
-| **Preconditions** | Initial backup taken with `secret.txt` and `file1.txt`. Second backup taken where `secret.txt` was modified (creating a historical diff copy in `diffs/hourly.0__.../`). |
+| **Preconditions** | Initial backup taken with `secret.txt` and `file1.txt`. Second backup taken where `secret.txt` was modified (creating a historical diff copy in `diffs/<snapshot_name>/`). |
 | **Steps**        | 1. Run `incr-backup remove secret.txt` |
 | **Expected Result** | - Exit code 0. <br>- `current/secret.txt` is deleted. <br>- `secret.txt` is deleted from all directories under `diffs/`. <br>- Every manifest in `.meta/manifests/` is rewritten without `secret.txt`, with updated `file_count` and `total_size`. <br>- `file1.txt` is completely unaffected. <br>- Subsequent `incr-backup verify` passes all checks. |
 | **Category**     | e2e |
@@ -1551,44 +1538,31 @@
 |------------------|-------|
 | **Test ID**      | TC-CFG-001 |
 | **Test Name**    | Diff local TOML config against remote `.meta/config.json` |
-| **Preconditions** | Remote initialized with default retention (6h/7d/4w/6m). Local config edited to minimal (3h/3d/2w/3m). |
+| **Preconditions** | Remote initialized with `exclude = ["*.tmp"]`. Local config edited to add `"*.log"`. |
 | **Steps**        | 1. Run `incr-backup -c my-config.toml config diff` |
-| **Expected Result** | - Output displays `Retention: (DIFFER)`. <br>- Highlights local values vs remote values. <br>- Reports `Found 1 difference(s)`. |
+| **Expected Result** | - Output displays `Excludes: (DIFFER)`. <br>- Highlights local values vs remote values. <br>- Reports `Found 1 difference(s)`. |
 | **Category**     | integration |
 
 ---
 
-### TC-CFG-002 — `status` and `verify` display warning notices on retention divergence
+### TC-CFG-002 — `config push` updates `.meta/config.json` under advisory cloud lock
 
 | Field            | Value |
 |------------------|-------|
 | **Test ID**      | TC-CFG-002 |
-| **Test Name**    | Retention mismatch warning emitted in status and verify |
-| **Preconditions** | Remote `.meta/config.json` has default retention. Local config has minimal retention. |
-| **Steps**        | 1. Run `incr-backup -c my-config.toml status`. <br>2. Run `incr-backup -c my-config.toml verify`. |
-| **Expected Result** | - `status` output displays remote retention and warning: `Local retention differs from remote metadata. Run incr-backup config push to sync`. <br>- `verify` Check 1 emits warning status `⚠ retention differs from local (...)`. |
-| **Category**     | integration |
-
----
-
-### TC-CFG-003 — `config push` updates `.meta/config.json` under advisory cloud lock
-
-| Field            | Value |
-|------------------|-------|
-| **Test ID**      | TC-CFG-003 |
 | **Test Name**    | Push local configuration to remote metadata |
-| **Preconditions** | Local configuration has updated retention or exclude patterns. |
+| **Preconditions** | Local configuration has updated exclude patterns. |
 | **Steps**        | 1. Run `incr-backup -c my-config.toml config push`. <br>2. Run `incr-backup -c my-config.toml config diff`. |
 | **Expected Result** | - Remote lock acquired and released. <br>- Remote `.meta/config.json` updated with local settings. <br>- Subsequent `config diff` reports `Local configuration and remote metadata are identical`. |
 | **Category**     | integration |
 
 ---
 
-### TC-CFG-004 — `config pull` writes remote metadata into local file with overwrite guard
+### TC-CFG-003 — `config pull` writes remote metadata into local file with overwrite guard
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-CFG-004 |
+| **Test ID**      | TC-CFG-003 |
 | **Test Name**    | Pull remote configuration into a local TOML file |
 | **Preconditions** | Remote `.meta/config.json` exists. Local destination path already exists. |
 | **Steps**        | 1. Run `incr-backup config pull --remote <REMOTE> --to existing.toml` without `--overwrite`. <br>2. Re-run with `--overwrite`. |
@@ -1597,15 +1571,15 @@
 
 ---
 
-### TC-CFG-005 — Configuration template validation
+### TC-CFG-004 — Configuration template validation
 
 | Field            | Value |
 |------------------|-------|
-| **Test ID**      | TC-CFG-005 |
+| **Test ID**      | TC-CFG-004 |
 | **Test Name**    | Validate syntax and parsing of `config/incr-backup-example.toml` |
 | **Preconditions** | File `config/incr-backup-example.toml` exists. |
 | **Steps**        | 1. Run unit test `test_example_config_file_parses` loading `config/incr-backup-example.toml`. |
-| **Expected Result** | - Successfully parses with `Config::load`. <br>- All fields, presets, comments, and globs verified. |
+| **Expected Result** | - Successfully parses with `Config::load`. <br>- All fields, options, comments, and globs verified. |
 | **Category**     | unit |
 
 ---
@@ -1644,7 +1618,7 @@
 |------------------|-------|
 | **Test ID**      | TC-COMP-003 |
 | **Test Name**    | Range contains exactly one snapshot |
-| **Preconditions** | Range contains a single snapshot `hourly.0__2026-10-28T08-00Z`. |
+| **Preconditions** | Range contains a single snapshot `2026-10-28T08-00Z`. |
 | **Steps**        | 1. Run `incr-backup compact --from <range> --name daily-single` |
 | **Expected Result** | - Snapshot manifest renamed to `.meta/manifests/daily-single.json`. <br>- Diff directory moved to `diffs/daily-single/`. <br>- Manifest `snapshot_name` updated to `daily-single`. <br>- Exit code 0. |
 | **Category**     | integration |
@@ -1735,24 +1709,24 @@
 |---------|----------|-------|
 | 1. `init` Command | TC-INIT-001 – TC-INIT-014 | 14 |
 | 2. `sync` — Core | TC-SYNC-001 – TC-SYNC-010 | 10 |
-| 3. `sync` — Rotation | TC-ROT-001 – TC-ROT-006 | 6 |
-| 4. `sync` — Cascade | TC-CASC-001 – TC-CASC-006 | 6 |
+| 3. `sync` — Discrete Snapshots | TC-SNAP-001 – TC-SNAP-006 | 6 |
+| 4. `sync` — Point-in-Time Integrity | TC-PIR-001 – TC-PIR-006 | 6 |
 | 5. `list` Command | TC-LIST-001 – TC-LIST-003 | 3 |
 | 6. `status` Command | TC-STAT-001 – TC-STAT-003 | 3 |
 | 7. `restore` Command | TC-REST-001 – TC-REST-008 | 8 |
 | 8. `diff` Command | TC-DIFF-001 – TC-DIFF-006 | 6 |
 | 9. `verify` Command | TC-VERI-001 – TC-VERI-005 | 5 |
 | 10. Locking & Concurrency | TC-LOCK-001 – TC-LOCK-005 | 5 |
-| 11. Journal & Resumability | TC-JOUR-001 – TC-JOUR-005 | 5 |
+| 11. Journal & Resumability | TC-JOUR-001 – TC-JOUR-004 | 4 |
 | 12. Error Handling | TC-ERR-001 – TC-ERR-008 | 8 |
 | 13. Configuration & Env | TC-CONF-001 – TC-CONF-008 | 8 |
 | 14. Filesystem Edge Cases | TC-FS-001 – TC-FS-011 | 11 |
 | 15. Network & Remote | TC-NET-001 – TC-NET-005 | 5 |
 | 16. Multi-Source & Namespace | TC-NS-001 – TC-NS-004 | 4 |
 | 17. `remove` Command | TC-REM-001 – TC-REM-006 | 6 |
-| 18. `config` Command | TC-CFG-001 – TC-CFG-005 | 5 |
+| 18. `config` Command | TC-CFG-001 – TC-CFG-004 | 4 |
 | 19. `compact` Command | TC-COMP-001 – TC-COMP-009 | 9 |
-| **Total** | | **123** |
+| **Total** | | **121** |
 
 ---
 

@@ -48,7 +48,7 @@ pub struct JournalStep {
     pub name: String,
     /// Current status of this step.
     pub status: StepStatus,
-    /// Optional details (e.g., list of renames for rotate_snapshots).
+    /// Optional details.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }
@@ -62,11 +62,11 @@ pub struct JournalStep {
 pub struct Journal {
     /// What operation is in progress (e.g., "sync", "init").
     pub operation: String,
-    /// Which level this sync targets (e.g., "hourly", "daily").
-    pub level: String,
+    /// Which snapshot this sync targets (e.g., "2026-10-29T10-30Z").
+    pub snapshot_name: String,
     /// When this operation started.
     pub started_at: DateTime<Utc>,
-    /// The backup-dir being used (e.g., "diffs/hourly.0__2026-10-28T08-00").
+    /// The backup-dir being used (e.g., "diffs/2026-10-29T10-30Z").
     pub backup_dir: String,
     /// Ordered list of steps with their current status.
     pub steps: Vec<JournalStep>,
@@ -81,7 +81,7 @@ pub struct Journal {
 /// ## Usage
 /// ```rust,ignore
 /// let jm = JournalManager::new(&rclone, "remote:backup/myhost");
-/// jm.create_journal("sync", "hourly", "diffs/hourly.0__...")?;
+/// jm.create_journal("sync", "2026-10-29T10-30Z", "diffs/2026-10-29T10-30Z")?;
 /// jm.update_step("rclone_sync", StepStatus::Running)?;
 /// // ... do work ...
 /// jm.update_step("rclone_sync", StepStatus::Done)?;
@@ -116,18 +116,17 @@ impl<'a> JournalManager<'a> {
 
     /// Create a new journal and upload it to the remote.
     ///
-    /// Sets up the standard sync steps: acquire_lock, rotate_snapshots,
-    /// delete_oldest, rclone_sync, generate_manifest, upload_manifest,
-    /// cleanup_journal, release_lock.
+    /// Sets up the standard sync steps: acquire_lock, rclone_sync,
+    /// generate_manifest, upload_manifest, cleanup_journal, release_lock.
     pub fn create_journal(
         &self,
         operation: &str,
-        level: &str,
+        snapshot_name: &str,
         backup_dir: &str,
     ) -> Result<()> {
         let journal = Journal {
             operation: operation.to_string(),
-            level: level.to_string(),
+            snapshot_name: snapshot_name.to_string(),
             started_at: Utc::now(),
             backup_dir: backup_dir.to_string(),
             steps: create_sync_steps(),
@@ -140,7 +139,7 @@ impl<'a> JournalManager<'a> {
         // Keep in-memory copy
         *self.journal.borrow_mut() = Some(journal);
 
-        info!("Journal created for {} at level {}", operation, level);
+        info!("Journal created for {} snapshot {}", operation, snapshot_name);
         Ok(())
     }
 
@@ -241,8 +240,6 @@ impl<'a> JournalManager<'a> {
 fn create_sync_steps() -> Vec<JournalStep> {
     let step_names = [
         "acquire_lock",
-        "rotate_snapshots",
-        "delete_oldest",
         "rclone_sync",
         "generate_manifest",
         "upload_manifest",
@@ -270,9 +267,9 @@ mod tests {
     fn test_journal_serialization() {
         let journal = Journal {
             operation: "sync".to_string(),
-            level: "hourly".to_string(),
+            snapshot_name: "2026-10-28T08-00Z".to_string(),
             started_at: Utc::now(),
-            backup_dir: "diffs/hourly.0__2026-10-28T08-00".to_string(),
+            backup_dir: "diffs/2026-10-28T08-00Z".to_string(),
             steps: create_sync_steps(),
         };
 
@@ -284,7 +281,7 @@ mod tests {
         // Roundtrip
         let restored: Journal = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.operation, "sync");
-        assert_eq!(restored.steps.len(), 8);
+        assert_eq!(restored.steps.len(), 6);
         assert_eq!(restored.steps[0].name, "acquire_lock");
     }
 
@@ -303,9 +300,9 @@ mod tests {
     #[test]
     fn test_create_sync_steps() {
         let steps = create_sync_steps();
-        assert_eq!(steps.len(), 8);
+        assert_eq!(steps.len(), 6);
         assert_eq!(steps[0].name, "acquire_lock");
-        assert_eq!(steps[7].name, "release_lock");
+        assert_eq!(steps[5].name, "release_lock");
         // All should start as Pending
         for step in &steps {
             assert_eq!(step.status, StepStatus::Pending);
@@ -316,7 +313,7 @@ mod tests {
     fn test_find_resume_point_all_done() {
         let journal = Journal {
             operation: "sync".to_string(),
-            level: "hourly".to_string(),
+            snapshot_name: "2026-10-28T08-00Z".to_string(),
             started_at: Utc::now(),
             backup_dir: "test".to_string(),
             steps: vec![
@@ -340,7 +337,7 @@ mod tests {
     fn test_find_resume_point_partial() {
         let journal = Journal {
             operation: "sync".to_string(),
-            level: "hourly".to_string(),
+            snapshot_name: "2026-10-28T08-00Z".to_string(),
             started_at: Utc::now(),
             backup_dir: "test".to_string(),
             steps: vec![

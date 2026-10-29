@@ -16,7 +16,7 @@ fn test_verify_command() {
         .success();
 
     env.command()
-        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--level", "hourly"])
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str()])
         .assert()
         .success();
 

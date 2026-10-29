@@ -15,9 +15,10 @@
 //!           ├── manifest.rs   — Snapshot manifest CRUD + diffing
 //!           ├── scanner.rs    — Local filesystem scan + parallel MD5 hashing
 //!           ├── rclone.rs     — rclone subprocess wrapper
-//!           ├── snapshot.rs   — Rotation, promotion, deletion logic
+//!           ├── snapshot.rs   — Snapshot naming and timezone formatting
 //!           ├── sync.rs       — Full sync pipeline orchestration
 //!           ├── restore.rs    — Restore with location resolution
+//!           ├── compact.rs    — Dynamic snapshot consolidation (two-phase commit)
 //!           ├── diff.rs       — Diff command (manifest comparison)
 //!           ├── verify.rs     — Backup integrity verification (12 checks)
 //!           ├── journal.rs    — Write-ahead journal for crash recovery

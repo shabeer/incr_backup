@@ -4,17 +4,16 @@ use common::TestEnv;
 use predicates::prelude::*;
 
 #[test]
-fn test_lock_prevents_concurrent_sync() {
+fn test_lock_prevents_concurrent_runs() {
     let env = TestEnv::new();
     env.write_source_file("file.txt", b"content");
 
-    // Init
     env.command()
         .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str()])
         .assert()
         .success();
 
-    // Create an artificial active lock file
+    // Manually create a lock file simulating another process
     let lock_json = serde_json::json!({
         "holder": "another-machine.local",
         "pid": 99999,
@@ -32,8 +31,6 @@ fn test_lock_prevents_concurrent_sync() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
         ])
         .assert()
         .failure()
@@ -47,8 +44,6 @@ fn test_lock_prevents_concurrent_sync() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
             "--force",
         ])
         .assert()
@@ -74,8 +69,6 @@ fn test_lock_error_respects_timezone() {
     env.command()
         .args([
             "sync",
-            "--level",
-            "hourly",
             "--source",
             &env.source_str(),
             "--remote",
@@ -94,8 +87,6 @@ fn test_lock_error_respects_timezone() {
     env.command()
         .args([
             "sync",
-            "--level",
-            "hourly",
             "--source",
             &env.source_str(),
             "--remote",
@@ -107,4 +98,3 @@ fn test_lock_error_respects_timezone() {
         .failure()
         .stderr(predicate::str::contains(local_expected));
 }
-

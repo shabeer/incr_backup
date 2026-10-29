@@ -2,7 +2,7 @@
 
 > **Reverse-incremental snapshot backup orchestration tool for rclone cloud remotes (Google Drive, S3, etc.)**
 > 
-> *Written in Rust with zero-bandwidth server-side file movements, write-ahead journaling, and rsnapshot-style retention.*
+> *Written in Rust with zero-bandwidth server-side file movements, write-ahead journaling, and dynamic snapshot consolidation.*
 
 ---
 
@@ -13,7 +13,7 @@
 3. [Quick Start Tutorial](#3-quick-start-tutorial)
 4. [Deep Dive: All Commands](#4-deep-dive-all-commands)
    - [init & init --adopt](#init--init---adopt)
-   - [sync & Cascade Rotation](#sync--cascade-rotation)
+   - [sync: Discrete Incremental Snapshots](#sync-discrete-incremental-snapshots)
    - [list & status](#list--status)
    - [diff between snapshots](#diff-between-snapshots)
    - [restore & location resolution](#restore--location-resolution)
@@ -44,10 +44,10 @@ flowchart LR
     subgraph "Remote: gdrive:backup/myhost/"
         CUR["current/<br/><b>Always the latest full state</b><br/>Directly browseable on Google Drive"]
         subgraph "diffs/"
-            D0["hourly.0__2026-10-28T08-00Z/<br/>Old versions from latest sync"]
-            D1["hourly.1__2026-10-28T07-00Z/"]
-            D2["daily.0__2026-10-27T00-00Z/"]
-            D3["weekly.0__2026-10-25T00-00Z/"]
+            D0["2026-10-28T08-00Z/<br/>Old versions from latest sync"]
+            D1["2026-10-28T07-00Z/"]
+            D2["daily-2026-10-27/"]
+            D3["weekly-2026-W43/"]
         end
         META[".meta/<br/>config.json<br/>journal.json<br/>lock<br/>manifests/"]
     end
@@ -61,7 +61,7 @@ flowchart LR
 1. **`current/` is always a full mirror**: You can open Google Drive on your phone or web browser and browse/download files directly from `current/`. No special software is needed to access your latest files.
 2. **Zero-bandwidth older versions**: When files change or are deleted locally, `rclone sync --backup-dir` performs a **server-side move** on Google Drive. Old versions are relocated from `current/` to a timestamped directory in `diffs/`. Zero bandwidth is used for the moved files.
 3. **Point-in-Time Manifests**: Every snapshot has a JSON manifest in `.meta/manifests/` listing every single file that existed at that point in time, with relative path, size, MD5 hash, and modification time.
-4. **rsnapshot Rotation**: Snapshots rotate through tiers (`hourly` → `daily` → `weekly` → `monthly`). Promotions between tiers (e.g., `hourly.5` → `daily.0`) are instant server-side folder renames.
+4. **Append-Only Snapshots & Decoupled Compaction**: Every sync creates an independent, immutable timestamped snapshot without slot limits or rotation overflows. Snapshots can be consolidated anytime via `compact` (e.g. hourly snapshots into a single daily snapshot) with zero data loss.
 
 ---
 
@@ -80,30 +80,27 @@ gdrive:backup/myhost/
 │       └── main.rs
 │
 ├── diffs/                               👈 Old versions of changed/deleted files
-│   ├── hourly.0__2026-10-28T08-00Z/     👈 Changes from most recent sync (or +0530 in local mode)
+│   ├── 2026-10-28T08-00Z/               👈 Changes from most recent sync (or +0530 in local mode)
 │   │   └── documents/
 │   │       └── report.pdf               (previous version before 8:00 AM edit)
-│   ├── hourly.1__2026-10-28T07-00Z/
-│   ├── daily-2026-10-28/                👈 Compacted from Day 2 runs
+│   ├── 2026-10-28T07-00Z/
+│   ├── daily-2026-10-28/                👈 Compacted from intermediate runs
 │   ├── weekly-2026-W43/                 👈 Compacted from 7 dailies
-│   ├── daily.0__2026-10-27T00-00Z/
-│   │   └── photos/
-│   │       └── deleted-photo.jpg        (deleted from source, safely preserved)
-│   ├── weekly.0__2026-10-25T00-00Z/
-│   └── monthly.0__2026-09-01T00-00Z/
+│   └── 2026-10-27T00-00Z/
+│       └── photos/
+│           └── deleted-photo.jpg        (deleted from source, safely preserved)
 │
 └── .meta/
-    ├── config.json                      👈 Remote backup configuration & retention
+    ├── config.json                      👈 Remote backup configuration & metadata
     ├── journal.json                     👈 Write-ahead log (only present during sync)
     ├── lock                             👈 Mutual exclusion lock (holds PID & host)
     ├── staging/                         👈 Safe staging during compaction (ephemeral)
     └── manifests/                       👈 Table of contents for each snapshot point
         ├── current.json                 (describes current state)
-        ├── hourly.0.json                (describes snapshot at hourly.0)
-        ├── hourly.1.json
+        ├── 2026-10-28T08-00Z.json       (describes snapshot at that time)
+        ├── 2026-10-28T07-00Z.json
         ├── daily-2026-10-28.json        (manifest for compacted daily snapshot)
-        ├── weekly-2026-W43.json         (manifest for compacted weekly snapshot)
-        └── daily.0.json
+        └── weekly-2026-W43.json         (manifest for compacted weekly snapshot)
 ```
 
 ---
@@ -119,7 +116,7 @@ incr-backup init
 
 Or specify source, remote, and presets explicitly via command-line arguments:
 ```bash
-# Basic initialization with default retention (6 hourly, 7 daily, 4 weekly, 6 monthly)
+# Basic initialization
 incr-backup init --source /home/user/documents --remote gdrive:backups/myhost
 ```
 
@@ -128,7 +125,6 @@ Output:
 Initializing backup:
   Source:    /home/user/documents
   Remote:    gdrive:backups/myhost
-  Retention: 6h/7d/4w/6m (default preset)
 Creating remote directory structure...
 Scanning remote for initial manifest...
 ✓ Initialized gdrive:backups/myhost
@@ -136,17 +132,17 @@ Scanning remote for initial manifest...
   Ready for incremental backups.
 ```
 
-### Step 2: Run an Hourly Sync
+### Step 2: Run a Sync
 
 ```bash
-incr-backup sync --level hourly
+incr-backup sync
 ```
 
 Output:
 ```text
 Syncing /home/user/documents → gdrive:backups/myhost/current/
 Generating manifest...
-✓ Sync complete: hourly.0__2026-10-28T08-00 (45,235 files, 200.1 GB, 14.2s)
+✓ Sync complete: 2026-10-28T08-00Z (45,235 files, 200.1 GB, 14.2s)
 ```
 
 ### Step 3: Check Status
@@ -161,7 +157,6 @@ Backup status for gdrive:backups/myhost
 
 Source:     /home/user/documents
 Remote:     gdrive:backups/myhost
-Retention:  6h / 7d / 4w / 6m (min interval: 30min)
 Lock:       (none)
 Current:    45,235 files, 200.1 GB
 Diffs:      12 files, 4.2 MB
@@ -170,14 +165,14 @@ Diffs:      12 files, 4.2 MB
 ### Step 4: Compare Snapshots
 
 ```bash
-incr-backup diff hourly.0 hourly.1
+incr-backup diff 2026-10-28T08-00Z 2026-10-28T07-00Z
 ```
 
 Output:
 ```text
-Comparing: hourly.0 (2026-10-28T08:00) ↔ hourly.1 (2026-10-28T07:00)
+Comparing: 2026-10-28T08-00Z ↔ 2026-10-28T07-00Z
 
-Added (in hourly.0, not in hourly.1):
+Added (in 2026-10-28T08-00Z, not in 2026-10-28T07-00Z):
   + projects/notes.md                                  2.4 KB
 
 Modified (same path, different content):
@@ -190,8 +185,8 @@ Summary: 1 added, 0 deleted, 1 modified
 ### Step 5: Restore from Any Point in Time
 
 ```bash
-# Restore specific file from 2 syncs ago to /tmp/restore
-incr-backup restore hourly.1 --to /tmp/restore --path report.pdf --verify
+# Restore specific file from an earlier sync to /tmp/restore
+incr-backup restore 2026-10-28T07-00Z --to /tmp/restore --path report.pdf --verify
 ```
 
 ---
@@ -232,42 +227,37 @@ incr-backup init --source /data/important --remote gdrive:backup --adopt
 
 ---
 
-### `sync` & Cascade Rotation
+### `sync`: Discrete Incremental Snapshots
 
-The `sync` command takes a required `--level <hourly|daily|weekly|monthly>`.
+Under **Dynamic Snapshot Consolidation**, every `sync` operation creates an append-only snapshot directory with its own manifest:
 
-#### 1. What Each Level Does:
-- `--level hourly`: Rotates hourly snapshots (`hourly.4` → `hourly.5`, etc.), runs `rclone sync --backup-dir diffs/hourly.0__<timestamp>`, generates manifest, and uploads to `.meta/manifests/hourly.0.json`.
-- `--level daily`: Rotates daily snapshots (`daily.5` → `daily.6`), promotes oldest hourly snapshot to `daily.0`, then executes the hourly sync.
-- `--level weekly`: Rotates weekly snapshots, promotes oldest daily to `weekly.0`, cascades to daily rotation, then executes the hourly sync.
-- `--level monthly`: Rotates monthlies, promotes oldest weekly to `monthly.0`, cascades down to hourly sync.
+1. **No Slot Limits or Rotation Overflow**: You can sync as often as you like (e.g. every 10 minutes, hourly, or before risky software deployments). There are no slot limits or destructive rotation cascades during sync.
+2. **Append-Only Immutability**: Previous snapshot manifests and diff directories are never modified or overwritten in-place during `sync`.
+3. **Optional Custom Snapshot Names**:
+   ```bash
+   # Standard timestamped snapshot (e.g. 2026-10-28T08-00Z)
+   incr-backup sync
 
-#### 2. Multiple Runs per Hour (Update-in-Place):
-If `hourly.0` was created less than `min_interval_minutes` (default: 30 minutes) ago:
-- The tool **skips rotation**.
-- It re-syncs into the existing `hourly.0` backup directory.
-- This prevents rapid manual syncs or tight cron schedules from filling up all 6 hourly slots.
-- To override this and force a rotation regardless of timing:
-  ```bash
-  incr-backup sync --level hourly --force-rotate
-  ```
+   # Custom named snapshot (e.g. before an OS update)
+   incr-backup sync --name pre-upgrade-v2
+   ```
 
-#### 3. Timezone in Snapshot Names:
+#### Timezone in Snapshot Names:
 Every snapshot name embeds an unambiguous, filesystem-safe timestamp (no colons `:`). You can control whether timestamps reflect UTC or local time:
-- **`--timezone utc` (default)**: Appends `Z` (e.g. `hourly.0__2026-10-29T04-28Z`). Canonical for cloud and multi-machine environments.
-- **`--timezone local` (or `--tz local`)**: Embeds the local numeric offset (e.g. `hourly.0__2026-10-29T09-58+0530`), matching your local wall-clock cron schedule.
+- **`--timezone utc` (default)**: Appends `Z` (e.g. `2026-10-29T04-28Z`). Canonical for cloud and multi-machine environments.
+- **`--timezone local` (or `--tz local`)**: Embeds the local numeric offset (e.g. `2026-10-29T09-58+0530`), matching your local wall-clock cron schedule.
 - Can also be set via `INCR_BACKUP_TIMEZONE` or `timezone = "local"` (or `[snapshot] timezone = "local"`) in `incr-backup.toml`.
 
 ```bash
 # Sync with local timezone snapshot naming
-incr-backup sync --level hourly --timezone local
+incr-backup sync --timezone local
 ```
 
 ---
 
 ### `list` & `status`
 
-- `list`: Lists all existing snapshot directories sorted chronologically by tier.
+- `list`: Lists all existing snapshot directories sorted chronologically.
   ```bash
   incr-backup list
   incr-backup list --json
@@ -281,10 +271,10 @@ incr-backup sync --level hourly --timezone local
 Compares any two snapshots entirely from their manifests. **Requires zero network file transfers** after the small JSON manifests are cached:
 
 ```bash
-incr-backup diff hourly.0 daily.0
-incr-backup diff hourly.0 daily.0 --stat          # Count and byte totals only
-incr-backup diff hourly.0 daily.0 --json          # Machine-readable output
-incr-backup diff hourly.0 daily.0 --only-modified # Filter for changed files only
+incr-backup diff 2026-10-28T08-00Z 2026-10-27T00-00Z
+incr-backup diff snap2 snap1 --stat               # Count and byte totals only
+incr-backup diff snap2 snap1 --json               # Machine-readable output
+incr-backup diff snap2 snap1 --only-modified      # Filter for changed files only
 ```
 
 ---
@@ -292,7 +282,7 @@ incr-backup diff hourly.0 daily.0 --only-modified # Filter for changed files onl
 ### `restore` & Location Resolution
 
 #### The Reverse-Incremental Challenge:
-When file `report.pdf` changes at time $T_1$, its previous version $T_0$ is moved to `diffs/hourly.0__.../`.
+When file `report.pdf` changes at time $T_1$, its previous version $T_0$ is moved to `diffs/<snapshot_name>/`.
 If another file `notes.txt` did not change between $T_0$ and now, it still lives in `current/notes.txt`.
 
 #### The Resolution Algorithm:
@@ -307,16 +297,16 @@ To restore snapshot $S$:
 
 ```bash
 # Restore entire snapshot
-incr-backup restore daily.0 --to /restore/full
+incr-backup restore 2026-10-27T00-00Z --to /restore/full
 
 # Restore consolidated snapshot
 incr-backup restore daily-2026-10-28 --to /restore/day2 --verify
 
 # Restore single file or subfolder
-incr-backup restore daily.0 --to /restore/docs --path documents/taxes/
+incr-backup restore 2026-10-27T00-00Z --to /restore/docs --path documents/taxes/
 
 # Overwrite existing destination
-incr-backup restore daily.0 --to /existing/dir --overwrite --verify
+incr-backup restore 2026-10-27T00-00Z --to /existing/dir --overwrite --verify
 ```
 
 ---
@@ -418,7 +408,7 @@ Verifying backup at gdrive:backup/myhost/
   ✓ File count match                       (45,231 files)
   ✓ Total size match                       (200.0 GB)
   ✓ Snapshot ordering                      (timestamps checked)
-  ✓ Retention compliance                   (h:6 d:7 w:4 m:6)
+  ✓ Manifest consistency                   (6 snapshots, 6 diff directories found)
   ✓ No stale lock                          (no lock file)
   ✓ Diff directories                       (6 diff directories found)
   ✓ Remote hashes match manifest           (45,231 files verified)
@@ -438,7 +428,7 @@ All checks passed. ✓
 ### `remove` & Snapshot History Purging
 
 #### The Challenge:
-In a reverse-incremental backup system, simply deleting a file from your local source and running `sync` only moves that file into `diffs/hourly.0__.../` to preserve historical versions. Older copies still remain preserved across snapshots!
+In a reverse-incremental backup system, simply deleting a file from your local source and running `sync` only moves that file into `diffs/<snapshot>/` to preserve historical versions. Older copies still remain preserved across snapshots!
 
 If you accidentally backed up an API secret, private credentials, or need to comply with **GDPR "Right to be Forgotten"**, the data must be completely erased from **both the current mirror and every historical snapshot**.
 
@@ -459,7 +449,7 @@ flowchart TD
 
 1. **Locking**: Acquires advisory lock at `.meta/lock` to ensure no backup runs concurrently.
 2. **Manifest Rewriting**:
-   - Iterates through every manifest in `.meta/manifests/` (`current.json`, `hourly.*.json`, `daily.*.json`, etc.).
+   - Iterates through every manifest in `.meta/manifests/` (`current.json`, `<snapshot>.json`, etc.).
    - Removes matching `FileEntry` records (supports exact file paths, directory prefixes with/without slashes, and glob patterns).
    - Recalculates `file_count` and `total_size`.
    - Re-uploads updated manifests.
@@ -497,16 +487,16 @@ The remote stores a metadata record at `.meta/config.json`. Local configurations
 The `config` command allows bidirectional synchronization and diff inspection between local configuration and remote metadata:
 
 #### 1. Inspect Differences (`config diff`):
-Checks local source, retention, and exclude patterns against `.meta/config.json`:
+Checks local source and exclude patterns against `.meta/config.json`:
 ```bash
 incr-backup config diff
 ```
-If values differ, it highlights the mismatch (e.g. `Retention: (DIFFER)`).
+If values differ, it highlights the mismatch (e.g. `Exclude Patterns: (DIFFER)`).
 
 #### 2. Push Local Config to Remote (`config push`):
 Safely updates `.meta/config.json` while acquiring the advisory cloud lock:
 ```bash
-# Push updated retention or exclude patterns:
+# Push updated exclude patterns:
 incr-backup config push
 
 # Preview changes without modifying remote metadata:
@@ -531,16 +521,9 @@ incr-backup config pull --overwrite
 
 #### 4. Design Decision: Why No Silent Auto-Update?
 `incr-backup` intentionally does **not** auto-update `.meta/config.json` on every sync:
-- **Protects Transient Overrides**: Environment variables (e.g., `INCR_BACKUP_HOURLY=12`) and one-off test config files (`-c test.toml`) remain transient without polluting shared remote metadata.
+- **Protects Transient Overrides**: Environment variables and one-off test config files (`-c test.toml`) remain transient without polluting shared remote metadata.
 - **Multi-Host Safety**: Multiple machines backing up to the same namespace won't clobber each other's configurations.
-- **Snapshot Safety**: Accidental local edits don't trigger silent, irreversible remote snapshot prunes.
-- **Visibility**: Both `status` and `verify` (Check 1) display warning notices (`⚠`) whenever local and remote policies diverge.
-
-#### 5. When Does Cleanup Happen (Moving from Aggressive to Minimal)?
-When shifting from `aggressive` (12h/14d/8w/12m) to `minimal` (3h/3d/2w/3m):
-- Cleanup is **passive** and happens **only on rotation during `sync --level <tier>`**.
-- Each tier cleans up its own oldest snapshot when its rotation limit is reached.
-- Untouched tiers are unaffected until their specific sync level fires (e.g., `daily` snapshots are only pruned when `sync --level daily` runs).
+- **Snapshot Safety**: Accidental local edits don't trigger silent, unintended remote changes.
 
 ---
 
@@ -553,13 +536,11 @@ Backup tools must be resilient against laptop sleep, network drops, and power cu
 ```json
 {
   "operation": "sync",
-  "level": "hourly",
+  "snapshot_name": "2026-10-28T08-00Z",
   "started_at": "2026-10-28T08:00:00Z",
-  "backup_dir": "diffs/hourly.0__2026-10-28T08-00",
+  "backup_dir": "diffs/2026-10-28T08-00Z",
   "steps": [
     { "name": "acquire_lock",      "status": "Done" },
-    { "name": "rotate_snapshots",  "status": "Done" },
-    { "name": "delete_oldest",     "status": "Done" },
     { "name": "rclone_sync",       "status": "Running" },
     { "name": "generate_manifest", "status": "Pending" },
     { "name": "upload_manifest",   "status": "Pending" },
@@ -610,17 +591,8 @@ Every unique version of a file exists in **exactly one location** on the remote:
 ### Worked Space Example (200 GB Source):
 - Source size: 200 GB (45,000 files)
 - Daily churn: ~2% = 4 GB/day (~0.5 GB/working hour)
-- Retention: 6 hourly, 7 daily, 4 weekly, 6 monthly = 23 total slots
-
-$$
-\text{Total Remote Storage} = S_{\text{source}} + N_{\text{slots}} \times \overline{\Delta}_{\text{per sync}}
-$$
-
-$$
-\text{Total Remote Storage} = 200\text{ GB} + 23 \times 0.5\text{ GB} = \mathbf{211.5\text{ GB}}\quad (\mathbf{1.06}\times\text{ of source})
-$$
-
-*(Compared to naive full copies which would require 23 × 200 GB = 4,600 GB.)*
+- After 24 hourly syncs, you have 24 historical diffs.
+- Running `incr-backup compact --from ... --to ... --name daily-YYYY-MM-DD` merges intermediate scratch revisions into a single snapshot, reclaiming superseded files while preserving earliest diffs with zero data loss.
 
 ---
 
@@ -629,20 +601,14 @@ $$
 Add these entries to your system `crontab` (`crontab -e`):
 
 ```cron
-# Hourly sync (at minute 0 of every hour)
-0 * * * *   /usr/local/bin/incr-backup sync --level hourly -c /etc/incr-backup/backup.toml >> /var/log/incr-backup.log 2>&1
+# Hourly sync: create an append-only snapshot every hour
+0 * * * *   /usr/local/bin/incr-backup sync -c /etc/incr-backup/backup.toml >> /var/log/incr-backup.log 2>&1
 
-# Daily sync (at 2:30 AM every day)
-30 2 * * *  /usr/local/bin/incr-backup sync --level daily  -c /etc/incr-backup/backup.toml >> /var/log/incr-backup.log 2>&1
-
-# Weekly sync (at 3:30 AM every Sunday)
-30 3 * * 0  /usr/local/bin/incr-backup sync --level weekly -c /etc/incr-backup/backup.toml >> /var/log/incr-backup.log 2>&1
-
-# Monthly sync (at 4:30 AM on the 1st of every month)
-30 4 1 * *  /usr/local/bin/incr-backup sync --level monthly -c /etc/incr-backup/backup.toml >> /var/log/incr-backup.log 2>&1
+# Daily Compaction: Every night at 2:30 AM, consolidate yesterday's hourly snapshots
+30 2 * * *  /usr/local/bin/incr-backup compact --from "$(date -v-1d +\%Y-\%m-\%dT00:00:00\%z)" --to "$(date -v-1d +\%Y-\%m-\%dT23:59:59\%z)" --name "daily-$(date -v-1d +\%Y-\%m-\%d)" -c /etc/incr-backup/backup.toml >> /var/log/incr-backup.log 2>&1
 ```
 
-> **Overlap Protection:** If the 2:30 AM daily run is still transferring large files when the 3:00 AM hourly fires, the 3:00 AM job detects the active lock, skips gracefully, and the 4:00 AM hourly proceeds normally.
+> **Overlap Protection:** If the 2:30 AM compaction run is still operating when the 3:00 AM hourly sync fires, the 3:00 AM job detects the active advisory lock (`.meta/lock`), skips gracefully, and the 4:00 AM sync proceeds normally.
 
 ---
 

@@ -15,8 +15,6 @@ fn test_init_basic() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--retention",
-            "default",
         ])
         .assert()
         .success()
@@ -206,10 +204,10 @@ fn test_init_adopt_on_partial_structure_overwrites_config() {
     let env = TestEnv::new();
     env.write_source_file("source.txt", b"source data");
 
-    // Simulate an incomplete/interrupted structure: has .meta/ with minimal retention, and unmanaged file at root
+    // Simulate an incomplete/interrupted structure: has .meta/ and unmanaged file at root
     env.write_remote_file("unadopted.txt", b"unadopted data");
 
-    // Run first with minimal
+    // Run first
     env.command()
         .args([
             "init",
@@ -218,15 +216,15 @@ fn test_init_adopt_on_partial_structure_overwrites_config() {
             "--remote",
             &env.remote_str(),
             "--adopt",
-            "--retention",
-            "minimal",
+            "--exclude",
+            "*.tmp",
         ])
         .assert()
         .success();
 
-    // Verify retention was minimal
+    // Verify config was created
     let config_content = std::fs::read_to_string(env.remote_path.join(".meta/config.json")).unwrap();
-    assert!(config_content.contains("\"hourly\": 3"));
+    assert!(config_content.contains("*.tmp"));
 
     // Now remove diffs/ to simulate partial structure
     let _ = std::fs::remove_dir_all(env.remote_path.join("diffs"));
@@ -235,7 +233,7 @@ fn test_init_adopt_on_partial_structure_overwrites_config() {
     // Add another unmanaged file at remote root
     env.write_remote_file("new_file.txt", b"new content");
 
-    // Re-run with --adopt and --retention aggressive
+    // Re-run with --adopt and new exclude
     env.command()
         .args([
             "init",
@@ -244,8 +242,8 @@ fn test_init_adopt_on_partial_structure_overwrites_config() {
             "--remote",
             &env.remote_str(),
             "--adopt",
-            "--retention",
-            "aggressive",
+            "--exclude",
+            "*.log",
         ])
         .assert()
         .success()
@@ -255,9 +253,9 @@ fn test_init_adopt_on_partial_structure_overwrites_config() {
     assert!(env.remote_path.join("diffs").exists());
     // Verify new file was moved into current/
     assert!(env.remote_path.join("current/new_file.txt").exists());
-    // Verify config was overwritten with aggressive retention
+    // Verify config was overwritten with new exclude
     let overwritten_config = std::fs::read_to_string(env.remote_path.join(".meta/config.json")).unwrap();
-    assert!(overwritten_config.contains("\"hourly\": 12"));
+    assert!(overwritten_config.contains("*.log"));
 }
 
 #[test]
@@ -291,12 +289,8 @@ path = "{}"
 [remote]
 path = "{}"
 
-[retention]
-hourly = 4
-daily = 5
-weekly = 2
-monthly = 3
-min_interval_minutes = 30
+[exclude]
+patterns = ["*.bak"]
 "#,
         env.source_str(),
         env.remote_str()
@@ -307,8 +301,7 @@ min_interval_minutes = 30
         .args(["-c", cfg_path.to_str().unwrap(), "init"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Initialized"))
-        .stdout(predicate::str::contains("4h/5d/2w/3m (from config)"));
+        .stdout(predicate::str::contains("Initialized"));
 
     // Verify remote structure
     assert!(env.remote_path.join("current").exists());
@@ -317,10 +310,9 @@ min_interval_minutes = 30
     assert!(env.remote_path.join(".meta/config.json").exists());
     assert!(env.remote_path.join(".meta/manifests/current.json").exists());
 
-    // Verify uploaded remote config matches local custom retention
+    // Verify uploaded remote config matches local config
     let config_content = std::fs::read_to_string(env.remote_path.join(".meta/config.json")).unwrap();
-    assert!(config_content.contains("\"hourly\": 4"));
-    assert!(config_content.contains("\"daily\": 5"));
+    assert!(config_content.contains("*.bak"));
 }
 
 #[test]

@@ -14,15 +14,15 @@
 
 - 📂 **Directly Browseable on Cloud Storage**: `current/` is an exact mirror of your source directory. Open Google Drive on your phone, tablet, or web browser and access your latest files directly.
 - ⚡ **Zero-Bandwidth Historical Snapshots**: Changed or deleted files are moved server-side by rclone into `diffs/<snapshot>/`. Old versions take zero upload bandwidth.
-- 🔄 **rsnapshot-Style Retention**: Standard snapshot tiers: `hourly` → `daily` → `weekly` → `monthly`. Promotions between tiers are instant server-side folder renames.
+- 🔄 **Append-Only, Discrete Snapshots**: Every sync creates an independent, immutable timestamped snapshot. No fixed retention slots, rotation overflow, tier promotions, or in-place overwrites. Compaction and pruning are decoupled and handled cleanly by `compact`.
 - 🤝 **Adopt Existing Remotes (`--adopt`)**: Already synced 200 GB to Google Drive? `init --adopt` reorganizes existing files into `current/` via server-side moves in minutes with **zero re-uploading**.
 - 🛡️ **Crash Recovery via Write-Ahead Journal (WAL)**: Interrupted syncs resume automatically from the last completed step. Every operation is strictly idempotent.
 - 🔒 **Advisory Cloud Locking**: Prevents concurrent backup runs across machines or overlapping cron schedules, with automatic stale-lock expiration.
-- 🔍 **Manifest-Based Zero-Bandwidth Diff**: Compare any two snapshots (`diff hourly.0 daily.0`) in milliseconds without downloading file contents.
+- 🔍 **Manifest-Based Zero-Bandwidth Diff**: Compare any two snapshots (`diff snap1 snap2`) in milliseconds without downloading file contents.
 - 🎯 **Targeted & Verified Restore**: Restore entire snapshots or specific subpaths (`--path`), with optional cryptographic verification (`--verify`).
 - 🗜️ **Dynamic Snapshot Consolidation (`compact`)**: Arbitrary snapshot frequencies and point-in-time recovery with zero data loss. Compact hourly snapshots into a single daily snapshot, or dailies into a monthly, safely discarding intermediate scratch revisions via a two-phase staging protocol.
 - 🧹 **Purge from All Snapshots (`remove` / `rm`)**: Completely purge leaked credentials, sensitive directories, or GDPR-restricted files from `current/`, all historical diffs, and all manifests in one command.
-- 🌐 **Timezone-Aware Snapshot Names**: Snapshots always embed an explicit, filesystem-safe timezone indicator: UTC (`Z`, e.g. `hourly.0__2026-10-29T04-28Z`) or local offset (`%z`, e.g. `hourly.0__2026-10-29T09-58+0530`), with zero colons (`:`) for universal cross-platform compatibility. Fully configurable via `--timezone` / `--tz`, env var, or TOML (`timezone = "local"` / `[snapshot]`).
+- 🌐 **Timezone-Aware Snapshot Names**: Snapshots always embed an explicit, filesystem-safe timezone indicator: UTC (`Z`, e.g. `2026-10-29T04-28Z`) or local offset (`%z`, e.g. `2026-10-29T09-58+0530`), with zero colons (`:`) for universal cross-platform compatibility. Fully configurable via `--timezone` / `--tz`, env var, or TOML (`timezone = "local"` / `[snapshot]`).
 - ⚡ **Blazing Fast Local Parallel Scanner**: Multithreaded file traversal and MD5 checksum computation powered by `rayon` and `walkdir`.
 - 📦 **Single Standalone Binary**: No Python, JVM, or runtime dependencies. Just copy the 3 MB binary and run.
 
@@ -72,18 +72,15 @@ incr-backup init --adopt
 ### 2. Run Syncs
 
 ```bash
-# Run hourly sync (standard cron run, default UTC timestamp)
-incr-backup sync --level hourly
+# Run incremental sync (creates an immutable, timestamped snapshot)
+incr-backup sync
 
-# Run sync with local timezone timestamps (e.g., hourly.0__2026-10-29T09-58+0530):
-incr-backup sync --level hourly --timezone local
+# Run sync with custom snapshot name:
+incr-backup sync --name release-v1.0
+
+# Run sync with local timezone timestamp (e.g., 2026-10-29T09-58+0530):
+incr-backup sync --timezone local
 # (or shorthand: --tz local)
-
-# Force a new snapshot even if less than 30 minutes elapsed:
-incr-backup sync --level hourly --force-rotate
-
-# Run daily sync (rotates dailies, promotes oldest hourly to daily.0, runs sync):
-incr-backup sync --level daily
 ```
 
 ### 3. Inspect Status and Snapshots
@@ -100,8 +97,8 @@ incr-backup list
 
 ```bash
 # Compare what changed between two snapshots (zero bandwidth)
-incr-backup diff hourly.0 hourly.1
-incr-backup diff hourly.0 daily.0 --stat
+incr-backup diff 2026-10-28T08-00Z 2026-10-28T07-00Z
+incr-backup diff snap2 snap1 --stat
 ```
 
 ### 5. Restore Files
@@ -110,11 +107,11 @@ incr-backup diff hourly.0 daily.0 --stat
 # Restore latest state (current mirror)
 incr-backup restore current --to /tmp/restore-latest
 
-# Restore exact state from 2 days ago
-incr-backup restore daily.1 --to /tmp/restore-point-in-time --verify
+# Restore exact state from an earlier snapshot
+incr-backup restore 2026-10-27T00-00Z --to /tmp/restore-point-in-time --verify
 
 # Restore only a specific file or folder
-incr-backup restore daily.1 --to /tmp/restore-taxes --path documents/taxes/
+incr-backup restore daily-2026-10-28 --to /tmp/restore-taxes --path documents/taxes/
 ```
 
 ### 6. Verify Backup Integrity
@@ -143,7 +140,7 @@ incr-backup remove build/ --dry-run
 # Compare local configuration vs remote metadata (.meta/config.json)
 incr-backup config diff
 
-# Push updated local retention/excludes to remote metadata
+# Push updated local configuration/excludes to remote metadata
 incr-backup config push
 
 # Pull configuration from remote into a local TOML file
@@ -180,36 +177,19 @@ incr-backup compact \
 
 ---
 
-## Retention Presets & Lifecycle
+## Snapshot Lifecycle & Dynamic Consolidation
 
-### Built-in Presets (used with `--retention <PRESET>` during `init`):
+Unlike traditional tools that force rigid slot counts (e.g. 6 hourly, 7 daily) leading to rotation overflows or in-place overwrites, `incr-backup` uses **Dynamic Snapshot Consolidation**:
 
-| Preset | Hourly | Daily | Weekly | Monthly | History Depth |
-|---|:---:|:---:|:---:|:---:|---|
-| **`default`** | 6 | 7 | 4 | 6 | ~6 hours + 1 week + 1 month + 6 months |
-| **`aggressive`** | 12 | 14 | 8 | 12 | ~12 hours + 2 weeks + 2 months + 1 year |
-| **`minimal`** | 3 | 3 | 2 | 3 | Space-saving profile (~3h + 3d + 2w + 3m) |
-
-### Changing Retention on an Existing Backup:
-1. Edit the `[retention]` section in your local `incr-backup.toml` (e.g. adjust to `minimal` numbers: 3/3/2/3).
-2. Run `incr-backup config diff` to review differences with remote metadata.
-3. Run `incr-backup config push` to update `.meta/config.json` on the remote.
-
-> [!NOTE]
-> **Why No Silent Auto-Update?**
-> The tool deliberately does *not* automatically overwrite `.meta/config.json` on every `sync`. This protects transient overrides (`INCR_BACKUP_HOURLY=...` or temporary test config files), prevents multi-machine configuration clobbering, and ensures operators are never caught off guard by unintended snapshot purges. `status` and `verify` will warn you whenever local and remote configs differ.
-
-### When Does Cleanup Happen (e.g. Aggressive → Minimal)?
-* **No immediate deletion**: Changing the configuration file does not delete snapshots on disk immediately.
-* **Tier-specific rotation**: Deletion is passive and happens only when a tier rotates during `sync --level <tier>`.
-* **Oldest pruned first**: If existing snapshots in a tier exceed the new limit (e.g. 12 snapshots vs. limit of 3), the single oldest snapshot and its manifest are purged on each rotation until the count reaches the limit.
-* **Untouched tiers**: If you switch to `minimal` but only run `sync --level hourly`, daily and weekly snapshots remain until their respective cron jobs (`sync --level daily`, etc.) trigger rotation.
+1. **Discrete Backups**: Every `sync` invocation creates an append-only snapshot directory in `diffs/<snapshot>/` with an immutable manifest in `.meta/manifests/<snapshot>.json`.
+2. **Explicit Compaction (`compact`)**: Use `incr-backup compact --from <start> --to <end> --name <consolidated_name>` to merge intermediate snapshots across any date range. Intermediate scratch changes are safely discarded and earliest diff references are preserved with zero data loss.
+3. **Decoupled Operation**: Fast syncs never block waiting for complex tier purges. Storage compaction runs on your schedule or via periodic cron maintenance.
 
 ---
 
 ## Configuration File (`incr-backup.toml`)
 
-A fully documented template with all options and presets is available in [`config/incr-backup-example.toml`](./config/incr-backup-example.toml). You can create an `incr-backup.toml` file so you don't need to pass `--source` and `--remote` every time:
+A fully documented template is available in [`config/incr-backup-example.toml`](./config/incr-backup-example.toml). You can create an `incr-backup.toml` file so you don't need to pass `--source` and `--remote` every time:
 
 ```toml
 # Timezone used in snapshot timestamps: "utc" (default) or "local"
@@ -220,13 +200,6 @@ path = "/home/user/documents"
 
 [remote]
 path = "gdrive:backups/myhost"
-
-[retention]
-hourly = 6
-daily = 7
-weekly = 4
-monthly = 6
-min_interval_minutes = 30  # Update in place if sync runs more often than this
 
 [rclone]
 path = "rclone"
@@ -247,8 +220,8 @@ CLI Flags > Environment Variables (`INCR_BACKUP_SOURCE`, etc.) > TOML Configurat
 Usage: incr-backup [OPTIONS] <COMMAND>
 
 Commands:
-  init     Initialize a new backup configuration ([--source], [--remote], --adopt, --retention)
-  sync     Run a sync operation (--level <hourly|daily|weekly|monthly>, --force-rotate, --force)
+  init     Initialize a new backup configuration ([--source], [--remote], --adopt, --exclude)
+  sync     Run a sync operation ([--name], --force)
   list     List all snapshots (--json)
   status   Show backup status and storage summary
   restore  Restore a snapshot to a local directory (--to, --path, --verify, --overwrite)
@@ -275,17 +248,11 @@ Global Options:
 ## Recommended Cron Setup
 
 ```cron
-# Hourly: Every hour on the hour
-0 * * * *   /usr/local/bin/incr-backup sync --level hourly -c /etc/incr-backup/config.toml >> /var/log/incr-backup.log 2>&1
+# Sync: Run incremental backup every hour
+0 * * * *   /usr/local/bin/incr-backup sync -c /etc/incr-backup/config.toml >> /var/log/incr-backup.log 2>&1
 
-# Daily: Every morning at 2:30 AM
-30 2 * * *  /usr/local/bin/incr-backup sync --level daily  -c /etc/incr-backup/config.toml >> /var/log/incr-backup.log 2>&1
-
-# Weekly: Every Sunday at 3:30 AM
-30 3 * * 0  /usr/local/bin/incr-backup sync --level weekly -c /etc/incr-backup/config.toml >> /var/log/incr-backup.log 2>&1
-
-# Monthly: 1st of every month at 4:30 AM
-30 4 1 * *  /usr/local/bin/incr-backup sync --level monthly -c /etc/incr-backup/config.toml >> /var/log/incr-backup.log 2>&1
+# Daily Consolidation: Every night at 2:30 AM, compact yesterday's hourly snapshots
+30 2 * * *  /usr/local/bin/incr-backup compact --from "$(date -v-1d +\%Y-\%m-\%dT00:00:00\%z)" --to "$(date -v-1d +\%Y-\%m-\%dT23:59:59\%z)" --name "daily-$(date -v-1d +\%Y-\%m-\%d)" -c /etc/incr-backup/config.toml >> /var/log/incr-backup.log 2>&1
 ```
 
 ---
@@ -311,7 +278,7 @@ Test coverage includes:
 - **`test_verify.rs`**: Structural integrity, file counts, sizes, remote checksum verification, and space reports.
 - **`test_remove.rs`**: Single file and directory tree purging across current mirror and all historical diffs, manifest rewrites, dry-run mode, JSON output, and root protection.
 - **`test_compact.rs`**: Dynamic snapshot consolidation, ISO-8601 timezone offset validation, single-snapshot aliasing, intra-range create/delete lifecycle, dry-run modes (`--summary`, `--full-list`), and mathematical point-in-time restore across pre-range, consolidated, and post-range snapshots.
-- **`test_config.rs`**: Bidirectional configuration sync (`config push`, `config pull`), diff inspection (`config diff`), overwrite safety guards, retention divergence warnings in `status` and `verify`, and TOML timezone parsing (unquoted, sub-table placement, `[snapshot]`).
+- **`test_config.rs`**: Bidirectional configuration sync (`config push`, `config pull`), diff inspection (`config diff`), overwrite safety guards, and TOML timezone parsing (unquoted, sub-table placement, `[snapshot]`).
 
 ---
 

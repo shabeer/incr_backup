@@ -54,54 +54,6 @@ path = "/home/user/documents"
 path = "gdrive:backups/myhost"
 
 
-# ------------------------------------------------------------------------------
-# [retention] — Snapshot Retention Policy
-# ------------------------------------------------------------------------------
-# Controls how many snapshot slots are kept at each rotation tier.
-# Rotation moves oldest snapshots up the tiers (hourly -> daily -> weekly -> monthly)
-# and deletes the oldest snapshot once a tier's limit is reached.
-#
-# Available Preset Values:
-#
-# 1. "default" preset (Balanced — recommended for typical use):
-#    hourly = 6, daily = 7, weekly = 4, monthly = 6, min_interval_minutes = 30
-#    History: ~6 hours + 1 week + 1 month + 6 months
-#
-# 2. "aggressive" preset (Deeper history, higher storage usage):
-#    hourly = 12, daily = 14, weekly = 8, monthly = 12, min_interval_minutes = 30
-#    History: ~12 hours + 2 weeks + 2 months + 1 year
-#
-# 3. "minimal" preset (Space-saving, lean footprint):
-#    hourly = 3, daily = 3, weekly = 2, monthly = 3, min_interval_minutes = 30
-#    History: ~3 hours + 3 days + 2 weeks + 3 months
-# ------------------------------------------------------------------------------
-[retention]
-# Number of hourly snapshot slots to retain (must be > 0).
-# Example values: 3 (minimal), 6 (default), 12 (aggressive), 24 (full day)
-hourly = 6
-
-# Number of daily snapshot slots to retain (must be > 0).
-# Example values: 3 (minimal), 7 (default, 1 week), 14 (aggressive, 2 weeks), 30 (1 month)
-daily = 7
-
-# Number of weekly snapshot slots to retain (must be > 0).
-# Example values: 2 (minimal), 4 (default, ~1 month), 8 (aggressive, ~2 months)
-weekly = 4
-
-# Number of monthly snapshot slots to retain (must be > 0).
-# Example values: 3 (minimal, quarter), 6 (default, half-year), 12 (aggressive, 1 year)
-monthly = 6
-
-# Minimum gap in minutes required between rotations at the same level.
-# If a sync runs sooner than this interval, changes are updated in-place inside
-# the current snapshot instead of creating a new rotated slot.
-#
-# Values:
-#   30 = update in place if run within 30 minutes (prevents slot exhaustion)
-#    0 = always rotate on every run (classic rsnapshot behavior)
-#   60 = hourly snapshots rotate at most once per clock hour
-min_interval_minutes = 30
-
 
 # ------------------------------------------------------------------------------
 # [rclone] — Rclone Transport Options

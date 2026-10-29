@@ -23,9 +23,6 @@ fn test_sync_basic_and_incremental() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
         ])
         .assert()
         .success()
@@ -39,7 +36,7 @@ fn test_sync_basic_and_incremental() {
     env.delete_source_file("doc2.txt");
     env.write_source_file("doc3.txt", b"New content 3");
 
-    // Run sync again with force-rotate
+    // Run sync again
     env.command()
         .args([
             "sync",
@@ -47,9 +44,6 @@ fn test_sync_basic_and_incremental() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
         ])
         .assert()
         .success();
@@ -80,7 +74,7 @@ fn test_sync_basic_and_incremental() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("hourly."));
+        .stdout(predicate::str::contains("Total:"));
 
     // 5. Test status command
     env.command()
@@ -116,8 +110,6 @@ fn test_sync_dry_run() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
         ])
         .assert()
         .success()
@@ -143,9 +135,6 @@ fn test_sync_timezone_arguments() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
             "--timezone",
             "local",
         ])
@@ -180,9 +169,6 @@ fn test_sync_timezone_arguments() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
             "--tz",
             "utc",
         ])
@@ -201,4 +187,3 @@ fn test_sync_timezone_arguments() {
         diff_dirs_2
     );
 }
-

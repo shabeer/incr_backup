@@ -11,14 +11,13 @@ use std::process;
 use clap::{Parser, Subcommand};
 use log::{error, info};
 
-use incr_backup::config::{CliOverrides, Config, RetentionConfig, RetentionPreset, SnapshotTimezone};
+use incr_backup::config::{CliOverrides, Config, SnapshotTimezone};
 use incr_backup::diff::{DiffOptions, run_diff};
 use incr_backup::error::IncrError;
 use incr_backup::manifest::{format_size, Manifest};
 use incr_backup::rclone::Rclone;
 use incr_backup::remove::{RemoveOptions, run_remove};
 use incr_backup::restore::{RestoreOptions, run_restore};
-use incr_backup::snapshot::{RotationManager, SnapshotTier};
 use incr_backup::verify::{VerifyOptions, format_verify_result, run_verify};
 
 /// incr-backup — rsnapshot-like incremental backups for rclone remotes.
@@ -87,24 +86,16 @@ enum Commands {
         #[arg(long)]
         adopt: bool,
 
-        /// Retention preset (default, aggressive, minimal).
-        #[arg(long)]
-        retention: Option<String>,
-
         /// Exclude patterns (repeatable).
         #[arg(long)]
         exclude: Vec<String>,
     },
 
-    /// Run a sync operation.
+    /// Run a sync operation (creates an append-only snapshot).
     Sync {
-        /// Retention level: hourly, daily, weekly, monthly.
+        /// Optional custom snapshot name (defaults to current timestamp).
         #[arg(long)]
-        level: String,
-
-        /// Always rotate even if min_interval not elapsed.
-        #[arg(long)]
-        force_rotate: bool,
+        name: Option<String>,
 
         /// Break stale lock and run.
         #[arg(long)]
@@ -335,18 +326,16 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
             source,
             remote,
             adopt,
-            retention,
             exclude,
         } => {
-            cmd_init(config, source, remote, adopt, retention, exclude)?;
+            cmd_init(config, source, remote, adopt, exclude)?;
         }
 
         Commands::Sync {
-            level,
-            force_rotate,
+            name,
             force,
         } => {
-            cmd_sync(config, &level, force_rotate, force)?;
+            cmd_sync(config, name, force)?;
         }
 
         Commands::List { json } => {
@@ -447,7 +436,6 @@ fn cmd_init(
     source: Option<String>,
     remote: Option<String>,
     adopt: bool,
-    retention: Option<String>,
     exclude: Vec<String>,
 ) -> incr_backup::error::Result<()> {
     if let Some(s) = source {
@@ -468,16 +456,6 @@ fn cmd_init(
             "remote path is required. Set [remote].path in config, --remote flag, or INCR_BACKUP_REMOTE env var".to_string(),
         ));
     }
-
-    let retention_label = if let Some(ref preset_str) = retention {
-        let preset = RetentionPreset::from_str(preset_str)?;
-        config.retention = preset.to_retention();
-        format!(" ({} preset)", preset_str)
-    } else if config.retention == RetentionConfig::default() {
-        " (default preset)".to_string()
-    } else {
-        " (from config)".to_string()
-    };
 
     if !exclude.is_empty() {
         config.exclude.patterns = exclude;
@@ -546,10 +524,6 @@ fn cmd_init(
     println!("Initializing backup:");
     println!("  Source:    {}", config.source_path);
     println!("  Remote:    {}", config.remote_path);
-    println!(
-        "  Retention: {}h/{}d/{}w/{}m{}",
-        config.retention.hourly, config.retention.daily, config.retention.weekly, config.retention.monthly, retention_label
-    );
 
     if config.dry_run {
         println!("[DRY-RUN] Would create remote directory structure");
@@ -611,228 +585,84 @@ fn cmd_init(
 
 fn cmd_sync(
     config: Config,
-    level: &str,
-    force_rotate: bool,
+    name: Option<String>,
     force: bool,
 ) -> incr_backup::error::Result<()> {
     config.validate()?;
 
-    let tier = SnapshotTier::from_str(level)?;
-    let rclone = Rclone::new(&config);
-    let retention = &config.retention;
-    let remote_base = &config.remote_path;
-
-    let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base, config.timezone);
-    let journal_mgr = incr_backup::journal::JournalManager::new(&rclone, remote_base);
-    let rotation_mgr = RotationManager::new(&rclone, remote_base, retention);
-
-    let start = std::time::Instant::now();
-
-    // Check for existing journal
-    if let Some(journal) = journal_mgr.load_journal()? {
-        println!(
-            "Found interrupted operation from {}. Resuming...",
-            config.timezone.format_message_datetime(journal.started_at)
-        );
-    }
-
-    // Acquire lock
-    if !config.dry_run {
-        lock_mgr.acquire(force)?;
-    }
-
-    // Cascade rotation for higher tiers
-    if tier != SnapshotTier::Hourly {
-        cascade_sync(&tier, &rotation_mgr, config.dry_run)?;
-    }
-
-    // Determine rotation vs update-in-place
-    let should_rotate = if force_rotate {
-        true
-    } else {
-        rotation_mgr.should_rotate(&tier)?
-    };
-
-    let now = chrono::Utc::now();
-    let timestamp = config.timezone.format_datetime(now);
-
-    let (backup_dir_name, was_update) = if should_rotate {
-        if !config.dry_run {
-            rotation_mgr.rotate_tier(&SnapshotTier::Hourly)?;
-        }
-        (format!("hourly.0__{}", timestamp), false)
-    } else {
-        let existing = rotation_mgr
-            .get_newest_snapshot_name(&SnapshotTier::Hourly)?
-            .unwrap_or_else(|| format!("hourly.0__{}", timestamp));
-        (existing, true)
-    };
-
-    let backup_dir = format!("diffs/{}", backup_dir_name);
-    let remote_current = format!("{}/current/", remote_base);
-    let remote_backup_dir = format!("{}/{}", remote_base, backup_dir);
-
     if config.dry_run {
+        let now = chrono::Utc::now();
+        let snapshot_name = match &name {
+            Some(n) => n.clone(),
+            None => config.timezone.format_datetime(now),
+        };
+        let backup_dir = format!("diffs/{snapshot_name}");
+        let remote_current = format!("{}/current/", config.remote_path);
+        let remote_backup_dir = format!("{}/{}", config.remote_path, backup_dir);
         println!("[DRY-RUN] Would sync {} → {}", config.source_path, remote_current);
         println!("[DRY-RUN] Backup dir: {}", remote_backup_dir);
-    } else {
-        // Create journal
-        journal_mgr.create_journal("sync", level, &backup_dir)?;
-
-        // Ensure backup dir exists on remote
-        rclone.mkdir(&remote_backup_dir)?;
-
-        // Run rclone sync
-        println!("Syncing {} → {}", config.source_path, remote_current);
-        rclone.sync(
-            &config.source_path,
-            &remote_current,
-            Some(&remote_backup_dir),
-            &config.exclude.patterns,
-        )?;
-
-        // Generate and upload manifest
-        println!("Generating manifest...");
-        let lsjson = rclone.lsjson_recursive_hash(&remote_current)?;
-        let manifest = Manifest::from_rclone_lsjson(&lsjson, &backup_dir_name, &now)?;
-        let manifest_json = manifest.to_json()?;
-
-        let short_name = backup_dir_name.split("__").next().unwrap_or(&backup_dir_name);
-        rclone.rcat(
-            &format!("{}/.meta/manifests/{}.json", remote_base, short_name),
-            &manifest_json,
-        )?;
-        rclone.rcat(
-            &format!("{}/.meta/manifests/current.json", remote_base),
-            &manifest_json,
-        )?;
-
-        // Cleanup
-        journal_mgr.cleanup()?;
-        lock_mgr.release()?;
-
-        let duration = start.elapsed();
-        println!(
-            "✓ Sync complete: {} ({} files, {}, {:.1}s){}",
-            backup_dir_name,
-            manifest.file_count,
-            format_size(manifest.total_size),
-            duration.as_secs_f64(),
-            if was_update { " [update-in-place]" } else { "" },
-        );
+        return Ok(());
     }
 
-    Ok(())
-}
+    let rclone = Rclone::new(&config);
+    let pipeline = incr_backup::sync::SyncPipeline::new(&config, &rclone);
+    let options = incr_backup::sync::SyncOptions {
+        name,
+        force_lock: force,
+        dry_run: false,
+    };
 
-fn cascade_sync(
-    tier: &SnapshotTier,
-    rotation_mgr: &RotationManager,
-    dry_run: bool,
-) -> incr_backup::error::Result<()> {
-    match tier {
-        SnapshotTier::Monthly => {
-            if !dry_run {
-                rotation_mgr.rotate_tier(&SnapshotTier::Monthly)?;
-                rotation_mgr.promote(&SnapshotTier::Weekly, &SnapshotTier::Monthly)?;
-            }
-            cascade_sync(&SnapshotTier::Weekly, rotation_mgr, dry_run)?;
-        }
-        SnapshotTier::Weekly => {
-            if !dry_run {
-                rotation_mgr.rotate_tier(&SnapshotTier::Weekly)?;
-                rotation_mgr.promote(&SnapshotTier::Daily, &SnapshotTier::Weekly)?;
-            }
-            cascade_sync(&SnapshotTier::Daily, rotation_mgr, dry_run)?;
-        }
-        SnapshotTier::Daily => {
-            if !dry_run {
-                rotation_mgr.rotate_tier(&SnapshotTier::Daily)?;
-                rotation_mgr.promote(&SnapshotTier::Hourly, &SnapshotTier::Daily)?;
-            }
-        }
-        SnapshotTier::Hourly => {}
-    }
+    let result = pipeline.run(&options)?;
+
+    println!(
+        "✓ Sync complete: {} ({} files, {}, {:.1}s)",
+        result.snapshot_name,
+        result.files_changed,
+        format_size(result.bytes_transferred),
+        result.duration.as_secs_f64(),
+    );
+
     Ok(())
 }
 
 fn cmd_list(config: Config, json_output: bool) -> incr_backup::error::Result<()> {
     let rclone = Rclone::new(&config);
-    let retention = &config.retention;
     let remote_base = &config.remote_path;
-    let rotation_mgr = RotationManager::new(&rclone, remote_base, retention);
 
-    let tiers = [
-        SnapshotTier::Hourly,
-        SnapshotTier::Daily,
-        SnapshotTier::Weekly,
-        SnapshotTier::Monthly,
-    ];
+    let mut all_meta = incr_backup::compact::discover_all_snapshots(&rclone, remote_base).unwrap_or_default();
+    all_meta.sort_by_key(|s| s.created_at);
 
     if json_output {
-        let mut all_snapshots = Vec::new();
-        for tier in &tiers {
-            let snapshots = rotation_mgr.list_snapshots(tier)?;
-            for snap in snapshots {
-                all_snapshots.push(serde_json::json!({
-                    "tier": tier.prefix(),
-                    "index": snap.name.index,
-                    "timestamp": snap.name.timestamp,
-                    "dir_name": snap.dir_name,
-                }));
-            }
-        }
-
-        // Include consolidated / non-tier snapshots
-        let all_meta = incr_backup::compact::discover_all_snapshots(&rclone, remote_base).unwrap_or_default();
-        for meta in all_meta {
-            let is_tier = tiers.iter().any(|t| meta.name.starts_with(&format!("{}.", t.prefix())));
-            if !is_tier {
-                all_snapshots.push(serde_json::json!({
-                    "tier": "consolidated",
+        let snapshots: Vec<_> = all_meta
+            .iter()
+            .map(|meta| {
+                serde_json::json!({
                     "name": meta.name,
                     "timestamp": meta.created_at.to_rfc3339(),
                     "dir_name": meta.diff_dir,
-                }));
-            }
-        }
-
-        println!("{}", serde_json::to_string_pretty(&all_snapshots)?);
+                    "files": meta.manifest.file_count,
+                    "size": meta.manifest.total_size,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&snapshots)?);
     } else {
         println!("Snapshots at {}:\n", remote_base);
-        let mut total = 0;
-        for tier in &tiers {
-            let snapshots = rotation_mgr.list_snapshots(tier)?;
-            if !snapshots.is_empty() {
-                println!("  {}:", tier.prefix());
-                for snap in &snapshots {
-                    println!("    {}", snap.dir_name);
-                }
-                total += snapshots.len();
-            }
-        }
-
-        // Consolidated / non-tier snapshots
-        let all_meta = incr_backup::compact::discover_all_snapshots(&rclone, remote_base).unwrap_or_default();
-        let mut consolidated = Vec::new();
-        for meta in all_meta {
-            let is_tier = tiers.iter().any(|t| meta.name.starts_with(&format!("{}.", t.prefix())));
-            if !is_tier {
-                consolidated.push(meta);
-            }
-        }
-        if !consolidated.is_empty() {
-            println!("  consolidated:");
-            for snap in &consolidated {
-                println!("    {}", snap.name);
-            }
-            total += consolidated.len();
-        }
-
-        if total == 0 {
+        if all_meta.is_empty() {
             println!("  (no snapshots yet)");
+        } else {
+            for snap in &all_meta {
+                let display_time = config.timezone.format_display_datetime(snap.created_at);
+                println!(
+                    "  {} ({} files, {}, {})",
+                    snap.name,
+                    snap.manifest.file_count,
+                    format_size(snap.manifest.total_size),
+                    display_time,
+                );
+            }
         }
-        println!("\nTotal: {} snapshots", total);
+        println!("\nTotal: {} snapshots", all_meta.len());
     }
 
     Ok(())
@@ -883,34 +713,6 @@ fn cmd_status(config: Config) -> incr_backup::error::Result<()> {
     println!("Backup status for {}\n", remote_base);
     println!("Source:     {}", config.source_path);
     println!("Remote:     {}", remote_base);
-    println!(
-        "Retention:  {}h / {}d / {}w / {}m (min interval: {}min)",
-        config.retention.hourly,
-        config.retention.daily,
-        config.retention.weekly,
-        config.retention.monthly,
-        config.retention.min_interval_minutes,
-    );
-
-    // Check remote retention mismatch
-    let meta_config_path = format!("{}/.meta/config.json", remote_base);
-    if let Ok(content) = rclone.cat(&meta_config_path) {
-        if let Ok(remote_cfg) = serde_json::from_str::<incr_backup::config::RemoteConfig>(&content) {
-            if remote_cfg.retention != config.retention {
-                println!(
-                    "Remote Ret: {}h / {}d / {}w / {}m (min interval: {}min)",
-                    remote_cfg.retention.hourly,
-                    remote_cfg.retention.daily,
-                    remote_cfg.retention.weekly,
-                    remote_cfg.retention.monthly,
-                    remote_cfg.retention.min_interval_minutes,
-                );
-                println!(
-                    "⚠ Warning:  Local retention differs from remote metadata. Run `incr-backup config push` to sync."
-                );
-            }
-        }
-    }
 
     // Check lock
     let lock_mgr = incr_backup::lock::LockManager::new(&rclone, remote_base, config.timezone);
@@ -1187,19 +989,6 @@ fn cmd_config_push(
             }
 
             println!("Updating remote metadata at {}:", meta_path);
-            if cur.retention != target_remote.retention {
-                println!(
-                    "  Retention: {}h/{}d/{}w/{}m → {}h/{}d/{}w/{}m",
-                    cur.retention.hourly,
-                    cur.retention.daily,
-                    cur.retention.weekly,
-                    cur.retention.monthly,
-                    target_remote.retention.hourly,
-                    target_remote.retention.daily,
-                    target_remote.retention.weekly,
-                    target_remote.retention.monthly
-                );
-            }
             if cur.source_path != target_remote.source_path {
                 println!("  Source:    {} → {}", cur.source_path, target_remote.source_path);
             }
@@ -1208,13 +997,10 @@ fn cmd_config_push(
             }
         } else {
             println!("Creating remote metadata at {}:", meta_path);
-            println!(
-                "  Retention: {}h/{}d/{}w/{}m",
-                target_remote.retention.hourly,
-                target_remote.retention.daily,
-                target_remote.retention.weekly,
-                target_remote.retention.monthly
-            );
+            println!("  Source:    {}", target_remote.source_path);
+            if !target_remote.exclude_patterns.is_empty() {
+                println!("  Excludes:  {:?}", target_remote.exclude_patterns);
+            }
         }
 
         if dry_run {
@@ -1275,7 +1061,6 @@ fn cmd_config_pull(
     let pulled_config = Config {
         source_path: remote_config.source_path.clone(),
         remote_path: remote_base.to_string(),
-        retention: remote_config.retention.clone(),
         rclone: config.rclone.clone(),
         exclude: incr_backup::config::ExcludeConfig {
             patterns: remote_config.exclude_patterns.clone(),
@@ -1288,14 +1073,6 @@ fn cmd_config_pull(
     println!("Pulling configuration from {}:", meta_path);
     println!("  Source:    {}", pulled_config.source_path);
     println!("  Remote:    {}", pulled_config.remote_path);
-    println!(
-        "  Retention: {}h/{}d/{}w/{}m (min interval: {}min)",
-        pulled_config.retention.hourly,
-        pulled_config.retention.daily,
-        pulled_config.retention.weekly,
-        pulled_config.retention.monthly,
-        pulled_config.retention.min_interval_minutes,
-    );
     if !pulled_config.exclude.patterns.is_empty() {
         println!("  Excludes:  {:?}", pulled_config.exclude.patterns);
     }
@@ -1357,26 +1134,6 @@ fn cmd_config_diff(config: &Config) -> incr_backup::error::Result<()> {
         differences += 1;
     } else {
         println!("  Source Path: {} (match)", target_remote.source_path);
-    }
-
-    let r_local = &target_remote.retention;
-    let r_remote = &remote_config.retention;
-    if r_local != r_remote {
-        println!("  Retention: (DIFFER)");
-        println!(
-            "    Local:  {}h / {}d / {}w / {}m (min interval: {}m)",
-            r_local.hourly, r_local.daily, r_local.weekly, r_local.monthly, r_local.min_interval_minutes
-        );
-        println!(
-            "    Remote: {}h / {}d / {}w / {}m (min interval: {}m)",
-            r_remote.hourly, r_remote.daily, r_remote.weekly, r_remote.monthly, r_remote.min_interval_minutes
-        );
-        differences += 1;
-    } else {
-        println!(
-            "  Retention: {}h / {}d / {}w / {}m (min interval: {}m) (match)",
-            r_local.hourly, r_local.daily, r_local.weekly, r_local.monthly, r_local.min_interval_minutes
-        );
     }
 
     if target_remote.exclude_patterns != remote_config.exclude_patterns {

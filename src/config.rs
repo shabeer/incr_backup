@@ -16,8 +16,6 @@
 //! ## Key Types
 //! - [`Config`] — the full in-memory configuration (local use)
 //! - [`RemoteConfig`] — the subset serialized to `.meta/config.json` on the remote
-//! - [`RetentionConfig`] — how many snapshots to keep per tier
-//! - [`RetentionPreset`] — named presets (default / aggressive / minimal)
 
 use std::path::{Path, PathBuf};
 
@@ -25,134 +23,6 @@ use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{IncrError, Result};
-
-// ─── Retention Presets ──────────────────────────────────────────────────────
-
-/// Named retention presets that map to specific snapshot-count configurations.
-///
-/// Use during `init` to quickly set retention policy without specifying
-/// individual counts. Each preset balances history depth vs. storage cost.
-///
-/// Like a Java enum with a `toConfig()` method — each variant carries
-/// predefined numeric values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RetentionPreset {
-    /// Balanced retention: 6 hourly, 7 daily, 4 weekly, 6 monthly.
-    /// Covers ~6h + 1 week + 1 month + 6 months of history.
-    Default,
-
-    /// Maximum history: 12 hourly, 14 daily, 8 weekly, 12 monthly.
-    /// Uses more remote storage but keeps deeper history.
-    Aggressive,
-
-    /// Space-saving: 3 hourly, 3 daily, 2 weekly, 3 monthly.
-    /// Minimal footprint, less rollback depth.
-    Minimal,
-}
-
-impl RetentionPreset {
-    /// Convert this preset into a concrete [`RetentionConfig`] with numeric counts.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let retention = RetentionPreset::Default.to_retention();
-    /// assert_eq!(retention.hourly, 6);
-    /// ```
-    pub fn to_retention(self) -> RetentionConfig {
-        match self {
-            // `match` is exhaustive — the compiler forces us to handle every variant.
-            // Like Python's match/case (3.10+) but with compile-time completeness checks.
-            RetentionPreset::Default => RetentionConfig {
-                hourly: 6,
-                daily: 7,
-                weekly: 4,
-                monthly: 6,
-                min_interval_minutes: 30,
-            },
-            RetentionPreset::Aggressive => RetentionConfig {
-                hourly: 12,
-                daily: 14,
-                weekly: 8,
-                monthly: 12,
-                min_interval_minutes: 30,
-            },
-            RetentionPreset::Minimal => RetentionConfig {
-                hourly: 3,
-                daily: 3,
-                weekly: 2,
-                monthly: 3,
-                min_interval_minutes: 30,
-            },
-        }
-    }
-
-    /// Parse a preset name from a string (case-insensitive).
-    ///
-    /// Used when parsing CLI `--retention <PRESET>` argument.
-    ///
-    /// # Errors
-    /// Returns [`IncrError::InvalidConfig`] if the string doesn't match any preset.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Result<Self> {
-        // Like Python: {"default": ..., "aggressive": ..., "minimal": ...}.get(s.lower())
-        match s.to_lowercase().as_str() {
-            "default" => Ok(RetentionPreset::Default),
-            "aggressive" => Ok(RetentionPreset::Aggressive),
-            "minimal" => Ok(RetentionPreset::Minimal),
-            _ => Err(IncrError::InvalidConfig(format!(
-                "unknown retention preset '{}'. Expected: default, aggressive, minimal",
-                s
-            ))),
-        }
-    }
-}
-
-// ─── Retention Configuration ────────────────────────────────────────────────
-
-/// How many snapshots to keep at each rotation tier.
-///
-/// Each field is the maximum number of snapshot slots for that tier.
-/// When a tier is full and a new snapshot is created, the oldest is deleted.
-///
-/// `min_interval_minutes` controls the minimum gap between rotations at the
-/// same level — runs within this window update the current snapshot in-place
-/// instead of rotating (prevents rapid runs from filling all slots).
-///
-/// ## Analogy
-/// Like rsnapshot's `retain` directives in `/etc/rsnapshot.conf`:
-/// ```text
-/// retain  hourly  6
-/// retain  daily   7
-/// retain  weekly  4
-/// retain  monthly 6
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetentionConfig {
-    /// Number of hourly snapshot slots (e.g., 6 = keep last 6 hourly snapshots).
-    pub hourly: u32,
-
-    /// Number of daily snapshot slots.
-    pub daily: u32,
-
-    /// Number of weekly snapshot slots.
-    pub weekly: u32,
-
-    /// Number of monthly snapshot slots.
-    pub monthly: u32,
-
-    /// Minimum minutes between rotations at the same level.
-    /// If a snapshot was created less than this many minutes ago, the tool
-    /// updates it in-place instead of rotating. Set to 0 for rsnapshot behavior
-    /// (always rotate).
-    pub min_interval_minutes: u32,
-}
-
-impl Default for RetentionConfig {
-    /// Returns the "Default" preset: 6/7/4/6 with 30-minute minimum interval.
-    fn default() -> Self {
-        RetentionPreset::Default.to_retention()
-    }
-}
 
 // ─── Rclone Configuration ───────────────────────────────────────────────────
 
@@ -369,7 +239,6 @@ impl std::fmt::Display for SnapshotTimezone {
 struct TomlConfig {
     source: Option<TomlSource>,
     remote: Option<TomlRemote>,
-    retention: Option<RetentionConfig>,
     rclone: Option<RcloneConfig>,
     exclude: Option<ExcludeConfig>,
     snapshot: Option<TomlSnapshot>,
@@ -437,9 +306,6 @@ pub struct Config {
 
     /// Rclone remote path (e.g., `gdrive:backup/myhost`).
     pub remote_path: String,
-
-    /// Retention policy: how many snapshots per tier.
-    pub retention: RetentionConfig,
 
     /// Rclone binary configuration.
     pub rclone: RcloneConfig,
@@ -543,7 +409,6 @@ impl Config {
                 .remote
                 .and_then(|r| r.path)
                 .unwrap_or_default(),
-            retention: toml_config.retention.unwrap_or_default(),
             rclone: toml_config.rclone.unwrap_or_default(),
             exclude: toml_config.exclude.unwrap_or_default(),
             verbose: 0,
@@ -555,7 +420,7 @@ impl Config {
     /// Load configuration from a TOML file.
     ///
     /// Reads and parses the file at `path`. Missing optional sections
-    /// (retention, rclone, exclude) use built-in defaults. The `source` and
+    /// (rclone, exclude) use built-in defaults. The `source` and
     /// `remote` sections may be absent if they'll be provided via CLI/env later.
     ///
     /// # Errors
@@ -582,7 +447,6 @@ impl Config {
         Config {
             source_path: String::new(),
             remote_path: String::new(),
-            retention: RetentionConfig::default(),
             rclone: RcloneConfig::default(),
             exclude: ExcludeConfig::default(),
             verbose: 0,
@@ -668,13 +532,13 @@ impl Config {
 
     /// Validate the configuration for logical correctness.
     ///
-    /// Checks that required fields are set, retention counts are positive,
-    /// and the source directory exists (if local validation is appropriate).
+    /// Checks that required fields are set and the source directory exists
+    /// (if local validation is appropriate).
     ///
     /// Call this after `load()` + `with_overrides()` but before using the config.
     ///
     /// # Errors
-    /// - [`IncrError::InvalidConfig`] for invalid retention, empty paths
+    /// - [`IncrError::InvalidConfig`] for empty paths
     /// - [`IncrError::SourceNotFound`] if the source directory doesn't exist
     /// - [`IncrError::SourceNotDirectory`] if the source path isn't a directory
     pub fn validate(&self) -> Result<()> {
@@ -688,30 +552,6 @@ impl Config {
         if self.remote_path.is_empty() {
             return Err(IncrError::InvalidConfig(
                 "remote path is required. Set [remote].path in config, --remote flag, or INCR_BACKUP_REMOTE env var".to_string(),
-            ));
-        }
-
-        // Validate retention counts — each must be > 0.
-        // Zero slots means that tier would never keep any snapshots,
-        // which is almost certainly a user error.
-        if self.retention.hourly == 0 {
-            return Err(IncrError::InvalidConfig(
-                "retention.hourly must be > 0".to_string(),
-            ));
-        }
-        if self.retention.daily == 0 {
-            return Err(IncrError::InvalidConfig(
-                "retention.daily must be > 0".to_string(),
-            ));
-        }
-        if self.retention.weekly == 0 {
-            return Err(IncrError::InvalidConfig(
-                "retention.weekly must be > 0".to_string(),
-            ));
-        }
-        if self.retention.monthly == 0 {
-            return Err(IncrError::InvalidConfig(
-                "retention.monthly must be > 0".to_string(),
             ));
         }
 
@@ -738,7 +578,6 @@ impl Config {
     pub fn to_remote_config(&self) -> RemoteConfig {
         RemoteConfig {
             source_path: self.source_path.clone(),
-            retention: self.retention.clone(),
             exclude_patterns: self.exclude.patterns.clone(),
         }
     }
@@ -764,7 +603,6 @@ impl Config {
                     timezone: None,
                 })
             },
-            retention: Some(self.retention.clone()),
             rclone: Some(self.rclone.clone()),
             exclude: if self.exclude.patterns.is_empty() {
                 None
@@ -787,7 +625,7 @@ impl Config {
 ///
 /// Contains the information needed to understand the backup structure
 /// without access to the local TOML file. This is uploaded during `init`
-/// and updated whenever retention or exclude settings change.
+/// and updated whenever exclude settings change.
 ///
 /// ## What's NOT stored remotely
 /// - `rclone.path` — local binary path is irrelevant to the remote
@@ -801,9 +639,6 @@ pub struct RemoteConfig {
     /// The local source path that was backed up.
     /// Informational — helps identify what this backup contains.
     pub source_path: String,
-
-    /// Retention policy governing snapshot rotation.
-    pub retention: RetentionConfig,
 
     /// File exclusion patterns (same as local config).
     pub exclude_patterns: Vec<String>,
@@ -851,51 +686,6 @@ mod tests {
     }
 
     #[test]
-    fn test_retention_preset_default() {
-        let r = RetentionPreset::Default.to_retention();
-        assert_eq!(r.hourly, 6);
-        assert_eq!(r.daily, 7);
-        assert_eq!(r.weekly, 4);
-        assert_eq!(r.monthly, 6);
-        assert_eq!(r.min_interval_minutes, 30);
-    }
-
-    #[test]
-    fn test_retention_preset_aggressive() {
-        let r = RetentionPreset::Aggressive.to_retention();
-        assert_eq!(r.hourly, 12);
-        assert_eq!(r.daily, 14);
-        assert_eq!(r.weekly, 8);
-        assert_eq!(r.monthly, 12);
-    }
-
-    #[test]
-    fn test_retention_preset_minimal() {
-        let r = RetentionPreset::Minimal.to_retention();
-        assert_eq!(r.hourly, 3);
-        assert_eq!(r.daily, 3);
-        assert_eq!(r.weekly, 2);
-        assert_eq!(r.monthly, 3);
-    }
-
-    #[test]
-    fn test_retention_preset_from_str() {
-        assert_eq!(
-            RetentionPreset::from_str("default").unwrap(),
-            RetentionPreset::Default
-        );
-        assert_eq!(
-            RetentionPreset::from_str("AGGRESSIVE").unwrap(),
-            RetentionPreset::Aggressive
-        );
-        assert_eq!(
-            RetentionPreset::from_str("Minimal").unwrap(),
-            RetentionPreset::Minimal
-        );
-        assert!(RetentionPreset::from_str("unknown").is_err());
-    }
-
-    #[test]
     fn test_load_full_config() {
         let toml = r#"
 [source]
@@ -903,13 +693,6 @@ path = "/data/important"
 
 [remote]
 path = "gdrive:backup/myhost"
-
-[retention]
-hourly = 8
-daily = 10
-weekly = 5
-monthly = 8
-min_interval_minutes = 15
 
 [rclone]
 path = "/usr/bin/rclone"
@@ -923,11 +706,6 @@ patterns = ["*.tmp", ".DS_Store"]
 
         assert_eq!(config.source_path, "/data/important");
         assert_eq!(config.remote_path, "gdrive:backup/myhost");
-        assert_eq!(config.retention.hourly, 8);
-        assert_eq!(config.retention.daily, 10);
-        assert_eq!(config.retention.weekly, 5);
-        assert_eq!(config.retention.monthly, 8);
-        assert_eq!(config.retention.min_interval_minutes, 15);
         assert_eq!(config.rclone.path, "/usr/bin/rclone");
         assert_eq!(config.rclone.extra_flags, "--drive-acknowledge-abuse");
         assert_eq!(config.exclude.patterns, vec!["*.tmp", ".DS_Store"]);
@@ -949,7 +727,6 @@ path = "gdrive:bak"
         assert_eq!(config.source_path, "/data");
         assert_eq!(config.remote_path, "gdrive:bak");
         // Defaults
-        assert_eq!(config.retention.hourly, 6);
         assert_eq!(config.rclone.path, "rclone");
         assert!(config.exclude.patterns.is_empty());
     }
@@ -962,7 +739,6 @@ path = "gdrive:bak"
 
         assert_eq!(config.source_path, "");
         assert_eq!(config.remote_path, "");
-        assert_eq!(config.retention, RetentionConfig::default());
     }
 
     #[test]
@@ -1036,7 +812,6 @@ path = "gdrive:original"
         let config = Config {
             source_path: String::new(),
             remote_path: "gdrive:bak".to_string(),
-            retention: RetentionConfig::default(),
             rclone: RcloneConfig::default(),
             exclude: ExcludeConfig::default(),
             verbose: 0,
@@ -1056,7 +831,6 @@ path = "gdrive:original"
         let config = Config {
             source_path: "/tmp".to_string(),
             remote_path: String::new(),
-            retention: RetentionConfig::default(),
             rclone: RcloneConfig::default(),
             exclude: ExcludeConfig::default(),
             verbose: 0,
@@ -1072,37 +846,10 @@ path = "gdrive:original"
     }
 
     #[test]
-    fn test_validate_zero_retention() {
-        let config = Config {
-            source_path: "/tmp".to_string(),
-            remote_path: "gdrive:bak".to_string(),
-            retention: RetentionConfig {
-                hourly: 0,
-                daily: 7,
-                weekly: 4,
-                monthly: 6,
-                min_interval_minutes: 30,
-            },
-            rclone: RcloneConfig::default(),
-            exclude: ExcludeConfig::default(),
-            verbose: 0,
-            dry_run: false,
-            timezone: SnapshotTimezone::default(),
-        };
-        let result = config.validate();
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            IncrError::InvalidConfig(msg) => assert!(msg.contains("hourly must be > 0")),
-            other => panic!("expected InvalidConfig, got: {:?}", other),
-        }
-    }
-
-    #[test]
     fn test_validate_source_not_found() {
         let config = Config {
             source_path: "/nonexistent/path/that/does/not/exist".to_string(),
             remote_path: "gdrive:bak".to_string(),
-            retention: RetentionConfig::default(),
             rclone: RcloneConfig::default(),
             exclude: ExcludeConfig::default(),
             verbose: 0,
@@ -1123,7 +870,6 @@ path = "gdrive:original"
         let config = Config {
             source_path: "/tmp".to_string(),
             remote_path: "gdrive:bak".to_string(),
-            retention: RetentionConfig::default(),
             rclone: RcloneConfig::default(),
             exclude: ExcludeConfig::default(),
             verbose: 0,
@@ -1138,13 +884,6 @@ path = "gdrive:original"
         let config = Config {
             source_path: "/data/important".to_string(),
             remote_path: "gdrive:backup/myhost".to_string(),
-            retention: RetentionConfig {
-                hourly: 6,
-                daily: 7,
-                weekly: 4,
-                monthly: 6,
-                min_interval_minutes: 30,
-            },
             rclone: RcloneConfig::default(),
             exclude: ExcludeConfig {
                 patterns: vec!["*.tmp".to_string(), ".DS_Store".to_string()],
@@ -1157,7 +896,6 @@ path = "gdrive:original"
         let remote = config.to_remote_config();
 
         assert_eq!(remote.source_path, "/data/important");
-        assert_eq!(remote.retention.hourly, 6);
         assert_eq!(remote.exclude_patterns, vec!["*.tmp", ".DS_Store"]);
     }
 
@@ -1165,7 +903,6 @@ path = "gdrive:original"
     fn test_remote_config_json_roundtrip() {
         let remote = RemoteConfig {
             source_path: "/data/important".to_string(),
-            retention: RetentionConfig::default(),
             exclude_patterns: vec!["*.tmp".to_string()],
         };
 
@@ -1177,7 +914,6 @@ path = "gdrive:original"
         // Deserialize back
         let restored = RemoteConfig::from_json(&json).unwrap();
         assert_eq!(restored.source_path, remote.source_path);
-        assert_eq!(restored.retention.hourly, remote.retention.hourly);
         assert_eq!(restored.exclude_patterns, remote.exclude_patterns);
     }
 
@@ -1192,13 +928,6 @@ path = "gdrive:original"
         let config = Config {
             source_path: "/data/docs".to_string(),
             remote_path: "gdrive:backups/host1".to_string(),
-            retention: RetentionConfig {
-                hourly: 3,
-                daily: 3,
-                weekly: 2,
-                monthly: 3,
-                min_interval_minutes: 30,
-            },
             rclone: RcloneConfig::default(),
             exclude: ExcludeConfig {
                 patterns: vec!["*.tmp".to_string()],
@@ -1211,7 +940,6 @@ path = "gdrive:original"
         let toml_str = config.to_toml_string().unwrap();
         assert!(toml_str.contains("/data/docs"));
         assert!(toml_str.contains("gdrive:backups/host1"));
-        assert!(toml_str.contains("hourly = 3"));
         assert!(toml_str.contains("timezone = \"utc\""));
 
         // Verify it can be loaded back
@@ -1220,7 +948,6 @@ path = "gdrive:original"
         let loaded = Config::load(tmp_file.path()).unwrap();
         assert_eq!(loaded.source_path, "/data/docs");
         assert_eq!(loaded.remote_path, "gdrive:backups/host1");
-        assert_eq!(loaded.retention.hourly, 3);
         assert_eq!(loaded.exclude.patterns, vec!["*.tmp"]);
         assert_eq!(loaded.timezone, SnapshotTimezone::Utc);
     }
@@ -1308,11 +1035,6 @@ path = "gdrive:original"
         let config = Config::load(&example_path).expect("example config should parse cleanly");
         assert_eq!(config.source_path, "/home/user/documents");
         assert_eq!(config.remote_path, "gdrive:backups/myhost");
-        assert_eq!(config.retention.hourly, 6);
-        assert_eq!(config.retention.daily, 7);
-        assert_eq!(config.retention.weekly, 4);
-        assert_eq!(config.retention.monthly, 6);
-        assert_eq!(config.retention.min_interval_minutes, 30);
         assert!(config.exclude.patterns.contains(&"*.tmp".to_string()));
         assert_eq!(config.timezone, SnapshotTimezone::Utc);
     }

@@ -16,7 +16,7 @@ fn test_restore_current() {
         .success();
 
     env.command()
-        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--level", "hourly"])
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str()])
         .assert()
         .success();
 
@@ -63,9 +63,8 @@ fn test_restore_point_in_time() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
+            "--name",
+            "snap1",
         ])
         .assert()
         .success();
@@ -81,19 +80,18 @@ fn test_restore_point_in_time() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
+            "--name",
+            "snap2",
         ])
         .assert()
         .success();
 
-    // Now restore hourly.1 (which contains Version 1 of document.txt)
+    // Now restore snap1 (which contains Version 1 of document.txt)
     let restore_dir = env.temp_dir.path().join("restored_v1");
     env.command()
         .args([
             "restore",
-            "hourly.1",
+            "snap1",
             "--to",
             &restore_dir.to_string_lossy(),
             "--remote",
@@ -129,7 +127,7 @@ fn test_restore_dest_not_empty_requires_overwrite() {
         .success();
 
     env.command()
-        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--level", "hourly"])
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str()])
         .assert()
         .success();
 
@@ -150,7 +148,7 @@ fn test_restore_dest_not_empty_requires_overwrite() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("is not empty"));
+        .stderr(predicate::str::contains("not empty"));
 
     // Restore with --overwrite succeeds
     env.command()
@@ -165,4 +163,6 @@ fn test_restore_dest_not_empty_requires_overwrite() {
         ])
         .assert()
         .success();
+
+    assert!(restore_dir.join("doc.txt").exists());
 }

@@ -24,9 +24,6 @@ fn test_remove_single_file_from_all_snapshots() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
         ])
         .assert()
         .success();
@@ -45,9 +42,6 @@ fn test_remove_single_file_from_all_snapshots() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
         ])
         .assert()
         .success();
@@ -134,9 +128,6 @@ fn test_remove_directory_from_all_snapshots() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
         ])
         .assert()
         .success();
@@ -152,9 +143,6 @@ fn test_remove_directory_from_all_snapshots() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
-            "--force-rotate",
         ])
         .assert()
         .success();
@@ -230,8 +218,6 @@ fn test_remove_dry_run() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
         ])
         .assert()
         .success();
@@ -272,8 +258,6 @@ fn test_remove_multiple_files_and_json() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
         ])
         .assert()
         .success();
@@ -324,8 +308,6 @@ fn test_remove_alias_rm() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
         ])
         .assert()
         .success();
@@ -362,8 +344,6 @@ fn test_remove_nonexistent_target() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
         ])
         .assert()
         .success();

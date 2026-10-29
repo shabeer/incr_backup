@@ -1,7 +1,8 @@
-# incr-backup — Implementation Plan v3 (Final)
+# incr-backup — Implementation Plan (Dynamic Snapshot Consolidation)
 
-> Reverse-incremental snapshot backup for rclone GDrive remotes
+> Reverse-incremental snapshot backup for rclone cloud remotes (Google Drive, S3, etc.)
 > 
+> *Architecture updated: All tier rotations, slot limits, and in-place updates have been replaced by append-only discrete snapshots and dynamic snapshot consolidation (`compact`). See [DESIGN_SNAPSHOT_CONSOLIDATION.md](DESIGN_SNAPSHOT_CONSOLIDATION.md).*
 
 ---
 
@@ -11,8 +12,8 @@
 2. [Space Calculation — Worked Example](#space-calculation--worked-example)
 3. [Adopt Existing Remote (`init --adopt`)](#adopt-existing-remote-init---adopt)
 4. [Deduplication Guarantee](#deduplication-guarantee)
-5. [Rotation Semantics — When Does What Rotate?](#rotation-semantics--when-does-what-rotate)
-6. [Multiple Runs Per Hour — What Happens?](#multiple-runs-per-hour--what-happens)
+5. [Snapshot Semantics — Discrete Append-Only Snapshots (`sync`)](#snapshot-semantics--discrete-append-only-snapshots-sync)
+6. [Dynamic Snapshot Consolidation (`compact`)](#dynamic-snapshot-consolidation-compact)
 7. [Resumability — Surviving Interruptions](#resumability--surviving-interruptions)
 8. [Restore Algorithm](#restore-algorithm)
 9. [Diff Between Snapshots](#diff-between-snapshots)
@@ -42,11 +43,10 @@ flowchart LR
     subgraph "GDrive Remote: remote:backup/myhost/"
         CUR["current/<br/>Always the latest<br/>full state<br/><b>Directly browseable</b>"]
         subgraph "diffs/"
-            D0["hourly.0__2026-10-27T22-00Z/<br/>Old versions of files<br/>changed in latest sync"]
-            D1["hourly.1__2026-10-27T21-00Z/"]
-            D2["daily.0__2026-10-27T00-00Z/"]
-            D3["weekly.0__2026-10-25T00-00Z/"]
-            D4["monthly.0__2026-10-01T00-00Z/"]
+            D0["2026-10-28T08-00Z/<br/>Old versions of files<br/>changed in latest sync"]
+            D1["2026-10-28T07-00Z/"]
+            D2["daily-2026-10-27/"]
+            D3["weekly-2026-W43/"]
         end
         META[".meta/<br/>config.json<br/>journal.json<br/>lock<br/>manifests/"]
     end
@@ -61,7 +61,7 @@ flowchart LR
 2. When a sync runs, `rclone sync --backup-dir` uploads only changed files to `current/` and **server-side moves** (zero bandwidth) old versions from `current/` to a timestamped `diffs/` subdirectory.
 3. Files deleted from source are also moved to `diffs/` (preserved, not lost).
 4. A JSON manifest records the complete file listing at each snapshot point.
-5. rsnapshot-style rotation (hourly → daily → weekly → monthly) manages retention.
+5. Every `sync` is append-only, creating an independent, immutable snapshot. Dynamic snapshot consolidation (`compact`) periodically consolidates intermediate snapshots without data loss.
 
 ---
 
@@ -79,59 +79,37 @@ flowchart LR
 | Daily churn rate | ~2% of total size = ~4 GB/day |
 | Working hours (when changes happen) | 8 hours/day |
 | Hourly churn during work | 4 GB ÷ 8 hours = **~0.5 GB/hour** |
-| Retention | 6 hourly, 7 daily, 4 weekly, 6 monthly |
 
 ### Step-by-step Breakdown
 
-**Q: How many diff directories exist at any point?**
+**Q: How many diff directories exist after taking hourly syncs?**
 
-Each retained snapshot has exactly one diff directory. Total slots:
+Each sync creates an append-only snapshot with its own diff directory. If you run 24 hourly syncs in a day, 24 diff directories are created in `diffs/`.
 
-```
-hourly:  6 slots
-daily:   7 slots
-weekly:  4 slots
-monthly: 6 slots
-─────────────────
-Total:  23 slots
-```
+**Q: How is space reclaimed without slot limits or rotation?**
 
-**Q: What's in each diff directory?**
+Via **Dynamic Snapshot Consolidation (`compact`)**:
+Running `compact --from yesterday_start --to yesterday_end --name daily-YYYY-MM-DD` consolidates intermediate hourly snapshots into a single daily snapshot. Intermediate scratch versions of files that were overwritten multiple times throughout the day are discarded, while files needed to reconstruct any point in time are safely preserved according to the earliest diff rule.
 
-Each was created by a **single** `rclone sync --backup-dir` call. It contains the old versions of files that changed during that one sync interval. Average size per diff ≈ **0.5 GB**.
+### Space Usage Example (200 GB Source)
 
-**Q: But isn't a daily diff a whole day's worth of changes?**
-
-**No.** `daily.0` was originally an `hourly.N` that got **renamed** (promoted) during daily rotation. It still contains exactly the same data — one hour's worth of changes. The "daily" label only means "this snapshot is retained at the daily level." It doesn't change the directory's content or size.
-
-The same applies to weekly and monthly — they are all promoted hourlies, each containing ~0.5 GB.
-
-**Q: Then how are old daily changes preserved?**
-
-They're spread across multiple diff directories. Over a day with hourly syncs, 24 diffs are created. Only 6 fit in hourly slots; the rest are either promoted to daily or deleted when they fall off the end. The point-in-time state is reconstructed from `current/` + relevant diffs during restore.
-
-### Final Calculation
-
-| Component | Calculation | Size |
+| Component | Description | Size |
 |---|---|---|
 | `current/` | Full mirror of source | 200.0 GB |
-| 6 hourly diffs | 6 × 0.5 GB | 3.0 GB |
-| 7 daily diffs | 7 × 0.5 GB (each is a promoted hourly) | 3.5 GB |
-| 4 weekly diffs | 4 × 0.5 GB (each is a promoted daily) | 2.0 GB |
-| 6 monthly diffs | 6 × 0.5 GB (each is a promoted weekly) | 3.0 GB |
-| `.meta/` manifests | 23 JSON files, ~1 MB each | ~23 MB |
-| **Total** | | **~211.5 GB** |
+| 7 consolidated daily diffs | 7 days × ~4 GB/day net churn | ~28.0 GB |
+| Today's hourly diffs (uncompacted) | 8 working hours × 0.5 GB | ~4.0 GB |
+| `.meta/` manifests | JSON manifests (~1 MB each) | ~30 MB |
+| **Total** | | **~232.0 GB** |
 
 ### Formula
 
 $$
-\text{Total} = S_{\text{source}} + N_{\text{slots}} \times \overline{\Delta}_{\text{per sync}}
+\text{Total} = S_{\text{source}} + \sum \text{Size}(D_{\text{snapshots}})
 $$
 
 Where:
 - $S_{\text{source}}$ = current source size (200 GB)
-- $N_{\text{slots}}$ = total retention slots across all tiers (6 + 7 + 4 + 6 = 23)
-- $\overline{\Delta}_{\text{per sync}}$ = average size of changed/deleted files per sync (0.5 GB)
+- $D_{\text{snapshots}}$ = individual diff directories created by `sync` and consolidated by `compact`
 
 ### Comparison
 
@@ -280,132 +258,38 @@ Content A exists in two places — but they represent different timeline points 
 
 ---
 
-## Rotation Semantics — When Does What Rotate?
+## Snapshot Semantics — Discrete Append-Only Snapshots (`sync`)
 
 > [!IMPORTANT]
-> **Each `--level` only rotates ITS OWN tier (and promotes from one tier below).** Running `sync --level hourly` does NOT touch dailies, weeklies, or monthlies. The **cron schedule** controls when each level runs, not the tool.
+> Every `sync` execution is **append-only**. It creates an independent, immutable snapshot directory (`diffs/<snapshot_name>`) and manifests without slot limits, rotation cascades, or in-place overwrites. Compaction and pruning are decoupled and handled cleanly by `compact`.
 
-### What Each Level Does — Precisely
+### How Discrete Snapshots Work
 
-```mermaid
-flowchart TD
-    subgraph "sync --level hourly"
-        H1["1. Rotate hourlies ONLY<br/>Delete hourly.5 if full<br/>hourly.4→5, 3→4, 2→3, 1→2, 0→1"]
-        H2["2. rclone sync source → current/<br/>--backup-dir diffs/hourly.0__timestamp"]
-        H3["3. Generate & upload manifest"]
-        H1 --> H2 --> H3
-    end
-
-    subgraph "sync --level daily"
-        D1["1. Rotate dailies ONLY<br/>Delete daily.6 if full<br/>daily.5→6, ..., 0→1"]
-        D2["2. Promote: rename<br/>hourly.(max) → daily.0"]
-        D3["3. Then do hourly rotation + sync<br/>(exactly as above)"]
-        D1 --> D2 --> D3
-    end
-
-    subgraph "sync --level weekly"
-        W1["1. Rotate weeklies ONLY"]
-        W2["2. Promote: oldest daily → weekly.0"]
-        W3["3. Then do daily-level ops<br/>(daily rotation + hourly sync)"]
-        W1 --> W2 --> W3
-    end
-
-    subgraph "sync --level monthly"
-        M1["1. Rotate monthlies ONLY"]
-        M2["2. Promote: oldest weekly → monthly.0"]
-        M3["3. Then do weekly-level ops<br/>(cascades down to hourly sync)"]
-        M1 --> M2 --> M3
-    end
-```
-
-### Concrete Walkthrough: First 48 Hours
-
-```
-HOUR 1  — cron: sync --level hourly
-  Nothing to rotate (first run)
-  Sync runs → creates diffs/hourly.0__08:00
-  State: current, hourly.0
-  Dailies: (none)  Weeklies: (none)  Monthlies: (none)
-
-HOUR 2  — cron: sync --level hourly
-  Rotate: hourly.0 → hourly.1
-  Sync → new hourly.0__09:00
-  State: current, hourly.0, hourly.1
-  Dailies: UNTOUCHED  Weeklies: UNTOUCHED  Monthlies: UNTOUCHED
-
-HOUR 6  — cron: sync --level hourly
-  State: current, hourly.0 through hourly.5 (6 slots = FULL)
-
-HOUR 7  — cron: sync --level hourly
-  Rotate: DELETE hourly.5 (oldest), shift all down
-  Sync → new hourly.0
-  State: current, hourly.0–5 (still 6, oldest was purged)
-  Dailies: STILL UNTOUCHED (hourly cron never touches dailies!)
-
-2:30 AM — cron: sync --level daily ← ONLY FIRES ONCE PER DAY
-  1. Rotate dailies: nothing to rotate (first daily)
-  2. Promote: hourly.5 renamed → daily.0
-  3. Hourly rotation + sync: shift hourlies, create new hourly.0
-  State: current, hourly.0–4 (lost one to promotion), daily.0
-  Weeklies: UNTOUCHED  Monthlies: UNTOUCHED
-
-NEXT DAY 2:30 AM — cron: sync --level daily
-  1. Rotate dailies: daily.0 → daily.1
-  2. Promote: hourly.5 → daily.0
-  3. Hourly rotation + sync
-  State: current, hourly.0–4, daily.0–1
-
-SUNDAY 3:30 AM — cron: sync --level weekly ← ONLY FIRES ONCE PER WEEK
-  1. Rotate weeklies: nothing (first weekly)
-  2. Promote: daily.6 → weekly.0
-  3. Daily cascade → hourly sync
-  State: current, hourly.0–N, daily.0–5, weekly.0
-  Monthlies: UNTOUCHED
-```
-
-### Key Takeaway
-
-**Cron determines when each level fires, not the tool.** The tool never "auto-detects" that it's midnight or Sunday. If you don't set up the daily cron, dailies never happen — you'll only have hourly snapshots that get deleted when they fall off the end.
+1. **Independent Timestamped Snapshots**:
+   - By default, each sync formats a snapshot name using filesystem-safe ISO-8601 timestamps:
+     - UTC: `2026-10-28T08-00Z`
+     - Local: `2026-10-28T13-30+0530`
+   - Alternatively, a custom name can be provided via `--name <custom-name>`.
+2. **Reverse-Incremental Diff Capture**:
+   - `rclone sync source current/ --backup-dir diffs/<snapshot_name>` uploads new/modified files to `current/` and moves pre-modification versions to `diffs/<snapshot_name>/`.
+   - Files deleted from the source are preserved in `diffs/<snapshot_name>/`.
+3. **Dedicated Manifest**:
+   - A complete manifest is uploaded to `.meta/manifests/<snapshot_name>.json` and `.meta/manifests/current.json`.
 
 ---
 
-## Multiple Runs Per Hour — What Happens?
+## Dynamic Snapshot Consolidation (`compact`)
 
-### Default: Update In Place (No Rotation)
+Rather than relying on rigid hourly/daily/weekly slots that cause rotation overflow or premature data loss, `incr-backup` uses **Dynamic Snapshot Consolidation**:
 
-If `hourly.0` was created less than `min_interval_minutes` (default: 30) ago, the tool **skips rotation** and updates in place:
-
-```
-10:00 → sync --level hourly → NEW snapshot: rotates, creates hourly.0__10:00
-10:15 → sync --level hourly → UPDATE in place: re-syncs to same hourly.0__10:00
-10:45 → sync --level hourly → UPDATE in place: re-syncs to same hourly.0__10:00
-11:00 → sync --level hourly → NEW snapshot: rotates (>30 min), creates hourly.0__11:00
-```
-
-**Why?** Prevents rapid runs from filling up all 6 hourly slots with sub-hour snapshots and losing older history.
-
-**Update in place means:**
-1. `rclone sync source current/ --backup-dir diffs/hourly.0__10:00` re-runs with the SAME backup-dir
-2. The manifest for `hourly.0` is regenerated
-3. Older snapshots (hourly.1, hourly.2, ...) are untouched
-
-### `--force-rotate`: Always Rotate
-
-```bash
-incr-backup sync --level hourly --force-rotate
-```
-
-Forces rotation regardless of timing. Use when you know a significant change happened and want a distinct snapshot point.
-
-### Configuration
-
-```toml
-[rotation]
-# Minimum minutes between rotations at the same level.
-# 0 = always rotate (rsnapshot behavior)
-# 30 = default (update in place if recent)
-min_interval_minutes = 30
-```
+1. **Arbitrary Frequency Backups**: Run `sync` as often as desired (every 10 minutes, hourly, or before risky operations).
+2. **Periodic Consolidation**: Run `compact --from <start> --to <end> --name <consolidated_name>` (e.g. nightly via cron).
+3. **Reverse-Incremental Dependency Resolution**:
+   - When consolidating snapshots in a range, intermediate scratch revisions within the range are safely reclaimed.
+   - Files that must be retained for older snapshots outside the range are preserved in accordance with the earliest diff rule.
+4. **Two-Phase Safe Commit**:
+   - Phase 1: Consolidated diffs staged to `.meta/staging/<name>/` and manifest uploaded.
+   - Phase 2: Verified, moved to `diffs/<name>/`, and source snapshots safely purged. Zero data loss.
 
 ---
 
@@ -424,8 +308,6 @@ min_interval_minutes = 30
   "backup_dir": "diffs/hourly.0__2026-10-28T08-00",
   "steps": [
     { "name": "acquire_lock",      "status": "done" },
-    { "name": "rotate_snapshots",  "status": "done",    "renames": ["hourly.0→1", "hourly.1→2"] },
-    { "name": "delete_oldest",     "status": "done",    "deleted": "hourly.5__old_ts" },
     { "name": "rclone_sync",       "status": "running" },
     { "name": "generate_manifest", "status": "pending" },
     { "name": "upload_manifest",   "status": "pending" },
@@ -440,8 +322,6 @@ min_interval_minutes = 30
 | Interrupted During | What's Broken | Recovery on Re-run |
 |---|---|---|
 | **Lock acquisition** | Nothing changed | Retry from start |
-| **Rotation (renames)** | Some dirs renamed, others not | Journal has rename list → complete remaining |
-| **Delete oldest** | Old snapshot may/may not be deleted | Re-issue `rclone purge` (idempotent on missing dir) |
 | **`rclone sync`** | Partial upload to current/, partial moves to backup-dir | **Re-run same `rclone sync --backup-dir` command** — rclone is idempotent (see below) |
 | **Manifest generation** | Sync done, no manifest | Re-scan remote with `rclone lsjson --recursive --hash` |
 | **Manifest upload** | Manifest generated locally, not on remote | Re-upload |
@@ -481,24 +361,23 @@ min_interval_minutes = 30
 
 ### Location Resolution
 
-To restore snapshot `hourly.2` (state from 3 syncs ago):
+To restore snapshot `snap_A` (state from an earlier point in time):
 
 ```
-Timeline:  hourly.2  ←  hourly.1  ←  hourly.0  ←  current
-           (target)                                (newest)
+Timeline:  snap_A  ←  snap_B  ←  snap_C  ←  current
+           (target)                         (newest)
 ```
 
-For each file in `hourly.2`'s manifest, find where that version lives now:
+For each file in `snap_A`'s manifest, find where that version lives now:
 
 ```
 Search order (first match wins):
-  1. diffs/hourly.0/F  ← check closest diff after target first
-  2. diffs/hourly.1/F
-  3. diffs/hourly.2/F  ← the diff created at the target point
-  4. current/F         ← file unchanged since hourly.2
+  1. diffs/snap_C/F    ← check diffs created chronologically after target
+  2. diffs/snap_B/F
+  3. current/F         ← file unchanged since snap_A
 ```
 
-**Why this order?** When file X changed at `hourly.0` sync, the pre-hourly.0 version was moved from `current/` to `diffs/hourly.0/`. If X was also changed at `hourly.1` sync, the pre-hourly.1 version (= the hourly.2-era version) is in `diffs/hourly.1/`. So we search forward from the closest diff until we find X.
+**Why this order?** When file X changed at `snap_C` sync, the pre-`snap_C` version was moved from `current/` to `diffs/snap_C/`. If X was also changed at `snap_B` sync, the pre-`snap_B` version (= the `snap_A`-era version) is in `diffs/snap_B/`. So we search diff directories created chronologically after the target snapshot until we find X.
 
 ### Execution
 
@@ -711,13 +590,21 @@ incr-backup init
     --remote <REMOTE>         rclone remote path (optional if provided in config)
     --adopt                   Adopt existing rclone-synced directory
                               (moves files server-side into current/, zero bandwidth)
-    --retention <PRESET>      Retention preset (optional; defaults to config or 'default')
     --exclude <PATTERN>       Exclude pattern (repeatable)
 
 incr-backup sync
-    --level <LEVEL>           hourly | daily | weekly | monthly (required)
-    --force-rotate            Always rotate even if min_interval not elapsed
+    --name <NAME>             Custom snapshot name (optional; defaults to ISO timestamp)
     --force                   Break stale lock and run
+    --dry-run                 Preview what will be synced
+
+incr-backup compact
+    --from <ISO-8601>         Start of date range (inclusive, required)
+    --to <ISO-8601>           End of date range (inclusive, required)
+    --name <NAME>             Name of the consolidated snapshot (required)
+    --dry-run                 Preview what will be compacted without modifying remote
+    --summary                 Summary-only output in dry-run mode
+    --full-list               Full file listing output in dry-run mode
+    --force                   Break stale lock if present
 
 incr-backup list
     --json                    JSON output
@@ -750,34 +637,12 @@ incr-backup config <push|pull|diff>
     diff                      Compare local configuration vs remote metadata
 ```
 
-### `--retention` Presets & Lifecycle
+### Configuration Synchronization & Safety
 
-These set the initial retention counts during `init`. Editable later via local configuration file (`incr-backup.toml`).
-
-| Preset | Hourly | Daily | Weekly | Monthly | Use Case |
-|---|---|---|---|---|---|
-| `default` | 6 | 7 | 4 | 6 | Balanced — 6h + 1w + 1m + 6m of history |
-| `aggressive` | 12 | 14 | 8 | 12 | Maximum history, more space |
-| `minimal` | 3 | 3 | 2 | 3 | Save space, less history |
-
-Example: `incr-backup init --retention aggressive` sets hourly=12, daily=14, weekly=8, monthly=12.
-
-#### Changing Retention on an Existing Backup:
-1. Edit `[retention]` in local `incr-backup.toml` (template at `config/incr-backup-example.toml`).
+1. Edit local `incr-backup.toml` (template at `config/incr-backup-example.toml`).
 2. Run `incr-backup config diff` to review differences.
 3. Run `incr-backup config push` to update `.meta/config.json` on the remote under lock.
-
-#### When Does Cleanup Happen (e.g., Aggressive → Minimal)?
-- Changing configuration does **not** trigger immediate cleanup.
-- Cleanup occurs **passively on rotation during `sync --level <tier>`**.
-- If a tier has more snapshots than the configured limit (e.g., 12 hourly snapshots vs. minimal limit of 3), the single oldest snapshot and its manifest are deleted on each rotation until the count drops to the limit.
-- Tiers that are not executed remain untouched (e.g. daily/weekly snapshots are only pruned when their respective sync level runs).
-
-#### Why No Silent Auto-Update on `sync`?
-- **Transient Overrides**: Keeps CLI flags and environment variables (`INCR_BACKUP_HOURLY=12`) transient without overwriting persistent remote metadata.
-- **Multi-Host Safety**: Multiple hosts syncing to a remote namespace won't clobber each other's configurations.
-- **Accidental Deletions**: Protects against accidental local retention typos silently triggering massive historical pruning.
-- **Visibility**: Both `incr-backup status` and `incr-backup verify` (Check 1) emit warning notices (`⚠`) whenever local and remote configs differ.
+4. Run `incr-backup config pull --to <PATH>` to pull remote metadata into a local TOML file.
 
 ### Rclone Flags Integration & Safety Analysis for `sync`
 
@@ -787,7 +652,7 @@ Command-line arguments for `incr-backup` are parsed via `clap`. Raw rclone flags
 Instead, custom rclone flags are forwarded to all underlying `rclone` subprocess calls via any of three mechanisms:
 1. **Global CLI Option (`--rclone-flags`)**:
    ```bash
-   incr-backup --rclone-flags "--delete-excluded --delete-before --exclude-from /path/to/EXCLUDE_FILE.txt --transfers 16 --checkers 32 --no-update-dir-modtime --drive-chunk-size 64M --fast-list --links" sync --level hourly
+   incr-backup --rclone-flags "--delete-excluded --delete-before --exclude-from /path/to/EXCLUDE_FILE.txt --transfers 16 --checkers 32 --no-update-dir-modtime --drive-chunk-size 64M --fast-list --links" sync
    ```
 2. **Configuration File (`incr-backup.toml`)**:
    ```toml
@@ -798,7 +663,7 @@ Instead, custom rclone flags are forwarded to all underlying `rclone` subprocess
 3. **Environment Variable (`INCR_BACKUP_RCLONE_FLAGS`)**:
    ```bash
    export INCR_BACKUP_RCLONE_FLAGS="--delete-excluded --delete-before --exclude-from /path/to/EXCLUDE_FILE.txt --transfers 16 --checkers 32 --no-update-dir-modtime --drive-chunk-size 64M --fast-list --links"
-   incr-backup sync --level hourly
+   incr-backup sync
    ```
 
 #### Directory Isolation: Why `.meta/` and `diffs/` Are NOT Deleted
@@ -884,7 +749,7 @@ gdrive:backup/myhost/                    ← remote base path (configurable)
 | 2 | Compute local file MD5 hashes | Medium | No (local `walkdir` + `md5`) |
 | 3 | Read/write JSON manifests | Low | No |
 | 4 | Call rclone commands as subprocesses | Low | Yes (subprocess) |
-| 5 | Rotation logic (rename/delete dirs) | Medium | Yes (rclone moveto/purge) |
+| 5 | Snapshot consolidation & naming | Medium | Yes (rclone moveto/purge) |
 | 6 | Resolve file locations for restore | Medium | No (manifest lookups) |
 | 7 | Diff two manifests | Low | No |
 | 8 | Journal read/write | Low | No |
@@ -895,11 +760,12 @@ gdrive:backup/myhost/                    ← remote base path (configurable)
 | Phase | What | Estimated Time |
 |---|---|---|
 | 1. Foundation | Cargo scaffold, CLI, config, rclone wrapper, manifest, scanner, lock | 2-3 hours |
-| 2. Core backup | Journal, rotation, sync pipeline, init (with --adopt), list, status | 3-4 hours |
+| 2. Core backup | Journal, sync pipeline, init (with --adopt), list, status | 3-4 hours |
 | 3. Restore & diff | Location resolution, restore command, diff command | 2-3 hours |
 | 4. Hardening | Verify, dry-run, edge cases, error messages | 2-3 hours |
 | 5. Testing | Unit tests, integration tests with `:local:` backend | 3-4 hours |
-| **Total** | | **~12-17 hours of agent time** |
+| 6. Consolidation | Dynamic snapshot consolidation (`compact`), two-phase commit | 2-3 hours |
+| **Total** | | **~14-20 hours of agent time** |
 
 > [!NOTE]
 > With an AI coding agent working in focused sessions, this is achievable in **2-3 days of wall-clock time**. The previous "3-4 weeks" estimate was for a human developer writing Rust from scratch.
@@ -1009,7 +875,8 @@ incr-backup/
 │   ├── manifest.rs          # Manifest CRUD + diffing
 │   ├── scanner.rs           # Local scan + parallel MD5 (rayon + walkdir)
 │   ├── rclone.rs            # rclone subprocess wrapper
-│   ├── snapshot.rs          # Rotation, promotion, deletion
+│   ├── snapshot.rs          # Snapshot naming & timezone formatting
+│   ├── compact.rs           # Dynamic snapshot consolidation
 │   ├── sync.rs              # Full sync pipeline orchestration
 │   ├── restore.rs           # Restore with location resolution
 │   ├── diff.rs              # Diff command (delegates to manifest)
@@ -1020,9 +887,9 @@ incr-backup/
 └── tests/
     ├── common/mod.rs         # Test helpers
     ├── test_config.rs
+    ├── test_compact.rs
     ├── test_manifest.rs
     ├── test_scanner.rs
-    ├── test_rotation.rs
     ├── test_sync.rs
     ├── test_restore.rs
     ├── test_diff.rs
@@ -1085,12 +952,12 @@ Each namespace is fully independent — own config, manifests, lock, journal. No
 
 ```bash
 # Different sources via different configs
-incr-backup sync --level hourly -c ~/configs/documents.toml
-incr-backup sync --level daily  -c ~/configs/photos.toml
+incr-backup sync -c ~/configs/documents.toml
+incr-backup sync -c ~/configs/photos.toml
 
 # Or via env vars / CLI args
-incr-backup sync --level hourly -s ~/Documents -r gdrive:backups/documents
-incr-backup sync --level daily  -s ~/Photos    -r gdrive:backups/photos
+incr-backup sync -s ~/Documents -r gdrive:backups/documents
+incr-backup sync -s ~/Photos    -r gdrive:backups/photos
 ```
 
 ---
@@ -1098,70 +965,60 @@ incr-backup sync --level daily  -s ~/Photos    -r gdrive:backups/photos
 ## Implementation Phases — AI Coding Agent Timeline
 
 > [!NOTE]
-> These phases are designed for an **AI coding agent** to execute sequentially. Each phase produces working, tested code before moving to the next. Total estimated: **2-3 days**.
+> All phases are complete, including Phase 6 which implemented Dynamic Snapshot Consolidation (`compact`) and decoupled compaction from sync.
 
-### Phase 1: Foundation (~2-3 hours)
+### Phase 1: Foundation (✅ Done)
+- `error.rs` — `SyncError`, `ConfigError`, etc. with `thiserror`
+- `config.rs` — TOML parsing, env var overrides, CLI override merge, validation
+- `rclone.rs` — wrapper: `sync`, `lsjson`, `move`, `purge`, `mkdir`, `delete`, `moveto`, `size`, `cat`, `rcat`
+- `scanner.rs` — parallel local scan with `walkdir` + `rayon` + `md5`
+- `manifest.rs` — `Manifest`, `FileEntry`, `DiffResult` structs, JSON serde, `from_rclone_lsjson()`
+- `lock.rs` — create/check/release/break lock
+- Unit tests for each module
 
-- [ ] `cargo init`, Cargo.toml with all dependencies
-- [ ] `error.rs` — `SyncError`, `ConfigError`, etc. with `thiserror`
-- [ ] `config.rs` — TOML parsing, env var overrides, CLI override merge, validation
-- [ ] `rclone.rs` — wrapper: `sync`, `lsjson`, `move`, `purge`, `mkdir`, `delete`, `moveto`, `size`, `cat`, `rcat`
-- [ ] `scanner.rs` — parallel local scan with `walkdir` + `rayon` + `md5`
-- [ ] `manifest.rs` — `Manifest`, `FileEntry`, `DiffResult` structs, JSON serde, `from_rclone_lsjson()`
-- [ ] `lock.rs` — create/check/release/break lock
-- [ ] Unit tests for each module
+### Phase 2: Core Backup (✅ Done)
+- `journal.rs` — WAL journal: create, update step, load on restart
+- `snapshot.rs` — timezone-aware snapshot naming without tiers or slots
+- `sync.rs` — append-only pipeline: lock → journal → rclone sync → manifest → upload → journal cleanup → unlock
+- `main.rs` — `init` command (with `--adopt`), `sync` command, `list` command, `status` command
+- Integration tests with rclone `:local:` backend
 
-### Phase 2: Core Backup (~3-4 hours)
+### Phase 3: Restore & Diff (✅ Done)
+- `restore.rs` — location resolution, `--files-from` generation, multi-source copy, `--path` filter
+- `diff.rs` — manifest comparison, formatted output, `--json`/`--stat`/`--only-*` flags
+- `remove.rs` — purge files/directories across manifests, current/, and diffs/
+- Commands: `restore`, `diff`, `remove` (alias `rm`)
+- Integration tests
 
-- [ ] `journal.rs` — WAL journal: create, update step, load on restart
-- [ ] `snapshot.rs` — rotation: shift, promote, delete, min-interval check
-- [ ] `sync.rs` — full pipeline: lock → journal → min-interval check → rotate → rclone sync → manifest → upload → journal cleanup → unlock
-- [ ] `main.rs` — `init` command (with `--adopt`), `sync` command, `list` command, `status` command
-- [ ] Integration tests with rclone `:local:` backend
+### Phase 4: Hardening (✅ Done)
+- `verify.rs` — 12 checks, quick/medium/deep modes
+- `--dry-run` for all mutating commands
+- Edge cases: empty source warning, special chars, symlinks
+- Comprehensive error messages with recovery suggestions
+- README with usage examples
 
-### Phase 3: Restore & Diff (~2-3 hours)
+### Phase 5: Testing (✅ Done)
+- Unit tests for all modules
+- Integration tests covering TC-SYNC-*, TC-SNAP-*, TC-PIR-*, TC-REST-*, TC-DIFF-*, TC-REM-*, TC-LOCK-*, TC-JOUR-*
 
-- [ ] `restore.rs` — location resolution, `--files-from` generation, multi-source copy, `--path` filter
-- [ ] `diff.rs` — manifest comparison, formatted output, `--json`/`--stat`/`--only-*` flags
-- [ ] `remove.rs` — purge files/directories across manifests, current/, and diffs/
-- [ ] Commands: `restore`, `diff`, `remove` (alias `rm`)
-- [ ] Integration tests
-
-### Phase 4: Hardening (~2-3 hours)
-
-- [ ] `verify.rs` — all 12 checks, quick/medium/deep modes
-- [ ] `--dry-run` for all mutating commands
-- [ ] Edge cases: empty source warning, special chars, symlinks
-- [ ] Comprehensive error messages with recovery suggestions
-- [ ] README with usage examples
-
-### Phase 5: Testing (~3-4 hours)
-
-- [ ] Unit tests for all modules (target: 80%+ coverage)
-- [ ] Integration tests covering TC-SYNC-*, TC-ROT-*, TC-CASC-*, TC-REST-*, TC-DIFF-*
-- [ ] E2E tests with `:local:` backend simulating full lifecycle
-- [ ] Error/edge case tests: TC-ERR-*, TC-FS-*, TC-LOCK-*, TC-JOUR-*
+### Phase 6: Dynamic Snapshot Consolidation (`compact`) (✅ Done)
+- `compact.rs` — Dynamic snapshot consolidation algorithm (two-phase commit with staging, earliest diff rule, point-in-time mathematical consistency)
+- Removal of retention, tier cascade, and slot rotation overflow
 
 ---
 
 ## Cron Setup
 
 ```cron
-# Hourly (every hour, on the hour)
-  0 * * * *   /usr/local/bin/incr-backup sync --level hourly -c /etc/incr-backup/myhost.toml
+# Hourly append-only sync: create a snapshot every hour
+0 * * * *   /usr/local/bin/incr-backup sync -c /etc/incr-backup/myhost.toml >> /var/log/incr-backup.log 2>&1
 
-# Daily (2:30 AM — this is the ONLY time daily rotation happens)
- 30 2 * * *   /usr/local/bin/incr-backup sync --level daily  -c /etc/incr-backup/myhost.toml
-
-# Weekly (Sunday 3:30 AM — the ONLY time weekly rotation happens)
- 30 3 * * 0   /usr/local/bin/incr-backup sync --level weekly -c /etc/incr-backup/myhost.toml
-
-# Monthly (1st of month, 4:30 AM)
- 30 4 1 * *   /usr/local/bin/incr-backup sync --level monthly -c /etc/incr-backup/myhost.toml
+# Daily Compaction: Every night at 2:30 AM, consolidate yesterday's hourly snapshots
+30 2 * * *  /usr/local/bin/incr-backup compact --from "$(date -v-1d +\%Y-\%m-\%dT00:00:00\%z)" --to "$(date -v-1d +\%Y-\%m-\%dT23:59:59\%z)" --name "daily-$(date -v-1d +\%Y-\%m-\%d)" -c /etc/incr-backup/myhost.toml >> /var/log/incr-backup.log 2>&1
 ```
 
 > [!IMPORTANT]
-> **Overlap handling:** If a daily run at 2:30 AM is still going when the 3:00 AM hourly cron fires, the lock prevents the hourly from starting. It prints a warning and exits. The next hourly (4:00 AM) succeeds.
+> **Overlap handling:** If the 2:30 AM compaction run is still operating when the 3:00 AM hourly sync fires, the 3:00 AM sync detects the active advisory lock (`.meta/lock`), skips gracefully, and the 4:00 AM sync proceeds normally.
 
 ---
 
@@ -1175,33 +1032,35 @@ Full test case documentation: [TEST_CASES.md](docs/TEST_CASES.md)
 |---|---|---|
 | 1. `init` Command | TC-INIT-001 – 010 | 10 |
 | 2. `sync` — Core Operation | TC-SYNC-001 – 010 | 10 |
-| 3. `sync` — Retention & Rotation | TC-ROT-001 – 006 | 6 |
-| 4. `sync` — Cascade Promotion | TC-CASC-001 – 006 | 6 |
+| 3. `sync` — Discrete Snapshots | TC-SNAP-001 – 006 | 6 |
+| 4. `sync` — Point-in-Time Integrity | TC-PIR-001 – 006 | 6 |
 | 5. `list` Command | TC-LIST-001 – 003 | 3 |
 | 6. `status` Command | TC-STAT-001 – 003 | 3 |
 | 7. `restore` Command | TC-REST-001 – 008 | 8 |
 | 8. `diff` Command | TC-DIFF-001 – 006 | 6 |
 | 9. `verify` Command | TC-VERI-001 – 005 | 5 |
 | 10. Locking & Concurrency | TC-LOCK-001 – 005 | 5 |
-| 11. Journal & Resumability | TC-JOUR-001 – 005 | 5 |
+| 11. Journal & Resumability | TC-JOUR-001 – 004 | 4 |
 | 12. Error Handling & Edge Cases | TC-ERR-001 – 008 | 8 |
-| 13. Configuration & Environment | TC-CONF-001 – 006 | 6 |
+| 13. Configuration & Environment | TC-CONF-001 – 008 | 8 |
 | 14. Filesystem Edge Cases | TC-FS-001 – 011 | 11 |
 | 15. Network & Remote Failures | TC-NET-001 – 005 | 5 |
 | 16. Multi-Source & Namespace | TC-NS-001 – 004 | 4 |
 | 17. `remove` Command | TC-REM-001 – 006 | 6 |
-| 18. `config` Command | TC-CFG-001 – 005 | 5 |
-| **Total** | | **112** |
+| 18. `config` Command | TC-CFG-001 – 004 | 4 |
+| 19. `compact` Command | TC-COMP-001 – 009 | 9 |
+| **Total** | | **121** |
 
 ### Key Test Categories
 
 - **Happy path:** TC-INIT-001, TC-SYNC-001–005, TC-REST-001, TC-DIFF-001
-- **Rotation:** TC-ROT-001–006 (within limits, at limits, update-in-place, force-rotate)
-- **Cascade promotion:** TC-CASC-001–006 (daily←hourly, weekly←daily, monthly←weekly, empty tiers)
-- **Resumability:** TC-JOUR-001–005 (crash during each phase, journal replay)
+- **Discrete snapshots:** TC-SNAP-001–006 (append-only, custom name, timezone, rapid syncs, diff preservation)
+- **Point-in-time integrity:** TC-PIR-001–006 (manifests, journal resume, idempotency, exclude filters)
+- **Resumability:** TC-JOUR-001–004 (crash during each phase, journal replay)
 - **Edge cases:** TC-FS-001–011 (spaces, unicode, symlinks, 0-byte files, 50K files, 6GB files)
-- **Network failures:** TC-NET-001–005 (drop during rotation/sync/manifest, rate limits)
+- **Network failures:** TC-NET-001–005 (drop during sync/manifest, rate limits)
 - **Concurrent access:** TC-LOCK-001–005 (lock contention, stale lock, force-break)
+- **Consolidation:** TC-COMP-001–009 (dynamic snapshot consolidation, two-phase staging, earliest diff rule)
 
 ---
 
@@ -1214,7 +1073,7 @@ Full test case documentation: [TEST_CASES.md](docs/TEST_CASES.md)
 | 1 | "Explain how space calculation works" | [Space Calculation](#space-calculation--worked-example) — full worked example with Q&A format |
 | 2 | "Can we rclone move to current/? Use this for clean browsing" | [Adopt Existing Remote](#adopt-existing-remote-init---adopt) — yes, server-side move, 0 bandwidth |
 | 3 | "Why 3-4 weeks? Don't re-write rclone" | [Revised Analysis](#rust-vs-python--revised-analysis) — corrected: 2-3 days for AI agent |
-| 4 | "What is --retention used for?" | [CLI Reference → Retention Presets](#cli-reference) — table with default/aggressive/minimal values |
+| 4 | "What is --retention used for?" | [CLI Reference → Configuration Synchronization](#cli-reference) — local/remote metadata sync |
 | 5 | "What will be verified? Document all" | [Verify Command](#verify-command--what-gets-checked) — 12 checks in table with speed levels |
 
 ### Round 2 Comments (on v3 request)
@@ -1222,10 +1081,10 @@ Full test case documentation: [TEST_CASES.md](docs/TEST_CASES.md)
 | # | Comment | Where Addressed |
 |---|---|---|
 | 6 | "Document complex Rust code for Java/Python developers" | [Rust Code Documentation Guidelines](#rust-code-documentation-guidelines) — 5 rules with examples |
-| 7 | "What happens with --hourly multiple times in an hour?" | [Multiple Runs Per Hour](#multiple-runs-per-hour--what-happens) — update-in-place default + --force-rotate |
-| 8 | "Does each run rotate ALL retention levels?" | [Rotation Semantics](#rotation-semantics--when-does-what-rotate) — NO, level-specific only, with 48h walkthrough |
+| 7 | "How are intermediate snapshots consolidated?" | [Dynamic Snapshot Consolidation](#dynamic-snapshot-consolidation-compact) — compact command with two-phase safe commit |
+| 8 | "Are syncs append-only?" | [Snapshot Semantics](#snapshot-semantics--discrete-append-only-snapshots-sync) — YES, every sync creates an immutable snapshot |
 | 9 | "How is resumability handled?" | [Resumability](#resumability--surviving-interruptions) — journal-based WAL with interruption matrix |
-| 10 | "Add test cases" | [Test Cases](#test-cases-101-cases) — 101 test cases across 16 sections |
+| 10 | "Add test cases" | [Test Cases](#test-cases-112-cases) — comprehensive test suite |
 | 11 | "Avoid re-uploading 200GB" | [Adopt Existing Remote](#adopt-existing-remote-init---adopt) — `rclone move` (server-side) |
 | 12 | "Is deduplication guaranteed?" | [Deduplication Guarantee](#deduplication-guarantee) — proof by invariant |
 | 13 | "Diff between any two snapshots" | [Diff Between Snapshots](#diff-between-snapshots) — manifest comparison with code |

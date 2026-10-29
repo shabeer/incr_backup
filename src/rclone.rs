@@ -169,7 +169,7 @@ impl Rclone {
     /// Run `rclone moveto source dest`.
     ///
     /// Renames a single file or directory on the remote. Server-side on GDrive.
-    /// Used for snapshot rotation (e.g., `hourly.0` → `hourly.1`).
+    /// Used for staging commits or snapshot renaming (e.g., during compaction).
     pub fn moveto(&self, source: &str, dest: &str) -> Result<String> {
         self.run_rclone(
             &["moveto".to_string(), source.to_string(), dest.to_string()],
@@ -179,8 +179,8 @@ impl Rclone {
 
     /// Run `rclone purge <remote_path>`.
     ///
-    /// Deletes a directory and all its contents. Used to delete old snapshots
-    /// that have fallen off the retention window. Idempotent — purging a
+    /// Deletes a directory and all its contents. Used to delete obsolete snapshots
+    /// or diff directories during compaction. Idempotent — purging a
     /// non-existent directory may return an error, which we handle gracefully.
     pub fn purge(&self, remote_path: &str) -> Result<String> {
         self.run_rclone(&["purge".to_string(), remote_path.to_string()], true)
@@ -510,7 +510,6 @@ mod tests {
         Config {
             source_path: "/tmp/test-source".to_string(),
             remote_path: "test-remote:backup".to_string(),
-            retention: crate::config::RetentionConfig::default(),
             rclone: crate::config::RcloneConfig {
                 path: "rclone".to_string(),
                 extra_flags: String::new(),

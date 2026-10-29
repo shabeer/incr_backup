@@ -119,8 +119,6 @@ fn test_compact_single_snapshot() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--level",
-            "hourly",
             "--timezone",
             "utc",
         ])

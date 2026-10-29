@@ -8,7 +8,7 @@ fn test_config_push_pull_diff_and_warning() {
     let env = TestEnv::new();
     env.write_source_file("hello.txt", b"Hello World");
 
-    // Initialize with default retention (6h/7d/4w/6m)
+    // Initialize with exclude pattern ["*.tmp"]
     env.command()
         .args([
             "init",
@@ -16,13 +16,13 @@ fn test_config_push_pull_diff_and_warning() {
             &env.source_str(),
             "--remote",
             &env.remote_str(),
-            "--retention",
-            "default",
+            "--exclude",
+            "*.tmp",
         ])
         .assert()
         .success();
 
-    // Create a local config file with minimal retention (3h/3d/2w/3m)
+    // Create a local config file with updated exclude patterns ["*.tmp", "*.log"]
     let local_cfg_path = env.temp_dir.path().join("my-config.toml");
     let local_toml = format!(
         r#"[source]
@@ -31,12 +31,8 @@ path = "{}"
 [remote]
 path = "{}"
 
-[retention]
-hourly = 3
-daily = 3
-weekly = 2
-monthly = 3
-min_interval_minutes = 30
+[exclude]
+patterns = ["*.tmp", "*.log"]
 "#,
         env.source_str(),
         env.remote_str()
@@ -53,33 +49,10 @@ min_interval_minutes = 30
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Retention: (DIFFER)"))
+        .stdout(predicate::str::contains("Exclude Patterns: (DIFFER)"))
         .stdout(predicate::str::contains("Found 1 difference(s)"));
 
-    // 2. Verify that `status` displays a warning notice
-    env.command()
-        .args([
-            "-c",
-            local_cfg_path.to_str().unwrap(),
-            "status",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Warning:  Local retention differs from remote metadata"))
-        .stdout(predicate::str::contains("Run `incr-backup config push` to sync"));
-
-    // 3. Verify that `verify` displays a warning notice
-    env.command()
-        .args([
-            "-c",
-            local_cfg_path.to_str().unwrap(),
-            "verify",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("retention differs from local"));
-
-    // 4. Run `config push` to update remote metadata
+    // 2. Run `config push` to update remote metadata
     env.command()
         .args([
             "-c",
@@ -92,7 +65,7 @@ min_interval_minutes = 30
         .stdout(predicate::str::contains("Updating remote metadata"))
         .stdout(predicate::str::contains("Successfully pushed local configuration to remote metadata"));
 
-    // 5. Now `config diff` should report identical
+    // 3. Now `config diff` should report identical
     env.command()
         .args([
             "-c",
@@ -104,7 +77,7 @@ min_interval_minutes = 30
         .success()
         .stdout(predicate::str::contains("Local configuration and remote metadata are identical"));
 
-    // 6. Test `config pull` to a new file
+    // 4. Test `config pull` to a new file
     let pulled_cfg_path = env.temp_dir.path().join("pulled-config.toml");
     env.command()
         .args([
@@ -120,8 +93,7 @@ min_interval_minutes = 30
         .stdout(predicate::str::contains("Successfully wrote configuration"));
 
     let pulled_content = std::fs::read_to_string(&pulled_cfg_path).unwrap();
-    assert!(pulled_content.contains("hourly = 3"));
-    assert!(pulled_content.contains("daily = 3"));
+    assert!(pulled_content.contains("*.log"));
 }
 
 #[test]
@@ -157,9 +129,6 @@ timezone = local
             "-c",
             cfg_path.to_str().unwrap(),
             "sync",
-            "--level",
-            "hourly",
-            "--force-rotate",
         ])
         .assert()
         .success();
@@ -171,9 +140,6 @@ timezone = local
             "-c",
             cfg_path.to_str().unwrap(),
             "sync",
-            "--level",
-            "hourly",
-            "--force-rotate",
         ])
         .assert()
         .success();
