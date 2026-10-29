@@ -11,7 +11,7 @@ use std::process;
 use clap::{Parser, Subcommand};
 use log::{error, info};
 
-use incr_backup::config::{CliOverrides, Config, RetentionPreset};
+use incr_backup::config::{CliOverrides, Config, RetentionConfig, RetentionPreset};
 use incr_backup::diff::{DiffOptions, run_diff};
 use incr_backup::error::IncrError;
 use incr_backup::manifest::{format_size, Manifest};
@@ -65,21 +65,21 @@ struct Cli {
 enum Commands {
     /// Initialize a new backup configuration.
     Init {
-        /// Local source directory (required for init).
+        /// Local source directory (optional if provided in config).
         #[arg(long)]
-        source: String,
+        source: Option<String>,
 
-        /// rclone remote path (required for init).
+        /// rclone remote path (optional if provided in config).
         #[arg(long)]
-        remote: String,
+        remote: Option<String>,
 
         /// Adopt an existing rclone-synced directory.
         #[arg(long)]
         adopt: bool,
 
         /// Retention preset (default, aggressive, minimal).
-        #[arg(long, default_value = "default")]
-        retention: String,
+        #[arg(long)]
+        retention: Option<String>,
 
         /// Exclude patterns (repeatable).
         #[arg(long)]
@@ -267,7 +267,7 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
             retention,
             exclude,
         } => {
-            cmd_init(&source, &remote, adopt, &retention, &exclude, dry_run)?;
+            cmd_init(config, source, remote, adopt, retention, exclude)?;
         }
 
         Commands::Sync {
@@ -358,31 +358,48 @@ fn load_config(cli: &Cli) -> incr_backup::error::Result<Config> {
 // ── Command Implementations ─────────────────────────────────────────────────
 
 fn cmd_init(
-    source: &str,
-    remote: &str,
+    mut config: Config,
+    source: Option<String>,
+    remote: Option<String>,
     adopt: bool,
-    retention_preset: &str,
-    excludes: &[String],
-    dry_run: bool,
+    retention: Option<String>,
+    exclude: Vec<String>,
 ) -> incr_backup::error::Result<()> {
-    let preset = RetentionPreset::from_str(retention_preset)?;
-    let retention = preset.to_retention();
+    if let Some(s) = source {
+        config.source_path = s;
+    }
+    if let Some(r) = remote {
+        config.remote_path = r;
+    }
 
-    // Build a config for this init
-    let config = Config {
-        source_path: source.to_string(),
-        remote_path: remote.to_string(),
-        retention: retention.clone(),
-        rclone: incr_backup::config::RcloneConfig::default(),
-        exclude: incr_backup::config::ExcludeConfig {
-            patterns: excludes.to_vec(),
-        },
-        verbose: 1,
-        dry_run,
+    if config.source_path.is_empty() {
+        return Err(IncrError::InvalidConfig(
+            "source path is required. Set [source].path in config, --source flag, or INCR_BACKUP_SOURCE env var".to_string(),
+        ));
+    }
+
+    if config.remote_path.is_empty() {
+        return Err(IncrError::InvalidConfig(
+            "remote path is required. Set [remote].path in config, --remote flag, or INCR_BACKUP_REMOTE env var".to_string(),
+        ));
+    }
+
+    let retention_label = if let Some(ref preset_str) = retention {
+        let preset = RetentionPreset::from_str(preset_str)?;
+        config.retention = preset.to_retention();
+        format!(" ({} preset)", preset_str)
+    } else if config.retention == RetentionConfig::default() {
+        " (default preset)".to_string()
+    } else {
+        " (from config)".to_string()
     };
 
+    if !exclude.is_empty() {
+        config.exclude.patterns = exclude;
+    }
+
     // Validate source
-    let source_path = Path::new(source);
+    let source_path = Path::new(&config.source_path);
     if !source_path.exists() {
         return Err(IncrError::SourceNotFound(source_path.to_path_buf()));
     }
@@ -390,7 +407,7 @@ fn cmd_init(
     let rclone = Rclone::new(&config);
 
     // Inspect remote state
-    let root_entries = match rclone.lsf(remote) {
+    let root_entries = match rclone.lsf(&config.remote_path) {
         Ok(entries) => entries,
         Err(IncrError::RcloneFailed { code, ref stderr, .. })
             if code == 3 || stderr.to_lowercase().contains("directory not found") =>
@@ -407,7 +424,7 @@ fn cmd_init(
 
     // Scenario 2: Remote is already initialized (NO-OP, ignore --adopt)
     if is_initialized {
-        println!("[INFO] Remote already initialized at {}; nothing to do.", remote);
+        println!("[INFO] Remote already initialized at {}; nothing to do.", config.remote_path);
         let stray_entries: Vec<&str> = root_entries
             .iter()
             .map(|e| e.as_str())
@@ -419,7 +436,7 @@ fn cmd_init(
         if !stray_entries.is_empty() {
             eprintln!(
                 "[WARN] Unmanaged root files/directories detected in '{}' ({}). Please manually delete or move them out.",
-                remote,
+                config.remote_path,
                 stray_entries.join(", ")
             );
         }
@@ -429,7 +446,7 @@ fn cmd_init(
     // Scenario 3: Remote is non-empty, missing backup structure, and --adopt was NOT passed
     if !root_entries.is_empty() && !adopt {
         return Err(IncrError::RemoteNotEmptyNeedsAdopt {
-            remote: remote.to_string(),
+            remote: config.remote_path.clone(),
         });
     }
 
@@ -442,20 +459,20 @@ fn cmd_init(
     }
 
     println!("Initializing backup:");
-    println!("  Source:    {}", source);
-    println!("  Remote:    {}", remote);
+    println!("  Source:    {}", config.source_path);
+    println!("  Remote:    {}", config.remote_path);
     println!(
-        "  Retention: {}h/{}d/{}w/{}m ({} preset)",
-        retention.hourly, retention.daily, retention.weekly, retention.monthly, retention_preset
+        "  Retention: {}h/{}d/{}w/{}m{}",
+        config.retention.hourly, config.retention.daily, config.retention.weekly, config.retention.monthly, retention_label
     );
 
-    if dry_run {
+    if config.dry_run {
         println!("[DRY-RUN] Would create remote directory structure");
         return Ok(());
     }
 
     // Create current/
-    rclone.mkdir(&format!("{}/current/", remote))?;
+    rclone.mkdir(&format!("{}/current/", config.remote_path))?;
 
     if is_adopting {
         // Move existing files to current/
@@ -465,37 +482,37 @@ fn cmd_init(
             "diffs/**".to_string(),
             ".meta/**".to_string(),
         ];
-        rclone.move_dir(remote, &format!("{}/current/", remote), &move_excludes)?;
+        rclone.move_dir(&config.remote_path, &format!("{}/current/", config.remote_path), &move_excludes)?;
     }
 
     // Create remaining directory structure
     println!("Creating remote directory structure...");
-    rclone.mkdir(&format!("{}/diffs/", remote))?;
-    rclone.mkdir(&format!("{}/.meta/", remote))?;
-    rclone.mkdir(&format!("{}/.meta/manifests/", remote))?;
+    rclone.mkdir(&format!("{}/diffs/", config.remote_path))?;
+    rclone.mkdir(&format!("{}/.meta/", config.remote_path))?;
+    rclone.mkdir(&format!("{}/.meta/manifests/", config.remote_path))?;
 
     // Upload config (overwriting if already present)
-    let meta_path = format!("{}/.meta/config.json", remote);
+    let meta_path = format!("{}/.meta/config.json", config.remote_path);
     let remote_config = config.to_remote_config();
     let config_json = remote_config.to_json()?;
     rclone.rcat(&meta_path, &config_json)?;
 
     // Generate initial manifest by scanning current/
     println!("Scanning remote for initial manifest...");
-    let current_path = format!("{}/current/", remote);
+    let current_path = format!("{}/current/", config.remote_path);
     let lsjson = rclone.lsjson_recursive_hash(&current_path)?;
     let now = chrono::Utc::now();
     let manifest = Manifest::from_rclone_lsjson(&lsjson, "current", &now)?;
     let manifest_json = manifest.to_json()?;
     rclone.rcat(
-        &format!("{}/.meta/manifests/current.json", remote),
+        &format!("{}/.meta/manifests/current.json", config.remote_path),
         &manifest_json,
     )?;
 
     if is_adopting {
         println!("✓ Adopted {} files into current/", manifest.file_count);
     }
-    println!("✓ Initialized {}", remote);
+    println!("✓ Initialized {}", config.remote_path);
     println!("  {} files indexed ({})", manifest.file_count, format_size(manifest.total_size));
     println!("  Ready for incremental backups.");
 

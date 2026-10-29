@@ -106,6 +106,12 @@ gdrive:backup/myhost/
 
 ### Step 1: Initialize the Backup
 
+You can initialize using your `incr-backup.toml` configuration file:
+```bash
+incr-backup init
+```
+
+Or specify source, remote, and presets explicitly via command-line arguments:
 ```bash
 # Basic initialization with default retention (6 hourly, 7 daily, 4 weekly, 6 monthly)
 incr-backup init --source /home/user/documents --remote gdrive:backups/myhost
@@ -187,6 +193,11 @@ incr-backup restore hourly.1 --to /tmp/restore --path report.pdf --verify
 ## 4. Deep Dive: All Commands
 
 ### `init` & `init --adopt`
+
+`incr-backup init` sets up the remote backup directory layout (`current/`, `diffs/`, `.meta/`, and initial manifest).
+
+> [!NOTE]
+> `--source` and `--remote` are **optional** if defined in `incr-backup.toml` (or via `INCR_BACKUP_SOURCE` / `INCR_BACKUP_REMOTE` environment variables). If passed on the command line, `--source` and `--remote` override the configuration file.
 
 `incr-backup init` inspects the remote state before taking action:
 

@@ -171,6 +171,58 @@
 
 ---
 
+### TC-INIT-011 — Init from configuration file without CLI flags
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-INIT-011 |
+| **Test Name**    | Init uses source, remote, and retention from config file when flags are omitted |
+| **Preconditions** | `incr-backup.toml` exists with valid `[source]`, `[remote]`, and `[retention]`. Remote target is empty. |
+| **Steps**        | 1. Run `incr-backup init` |
+| **Expected Result** | - Exit code 0. <br>- `source` and `remote` read from `incr-backup.toml`. <br>- Retention from config file uploaded to remote `.meta/config.json`. <br>- Directory structure (`current/`, `diffs/`, `.meta/`) created on remote. |
+| **Category**     | integration |
+
+---
+
+### TC-INIT-012 — Init with configuration file and CLI flag overrides
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-INIT-012 |
+| **Test Name**    | CLI flags override config file values during init |
+| **Preconditions** | `incr-backup.toml` exists with source and remote paths. Alternate remote target exists and is empty. |
+| **Steps**        | 1. Run `incr-backup init --remote <other-remote>` |
+| **Expected Result** | - Exit code 0. <br>- Alternate remote path is initialized rather than the path in `incr-backup.toml`. <br>- Source path is taken from `incr-backup.toml`. |
+| **Category**     | integration |
+
+---
+
+### TC-INIT-013 — Init fails when source path is missing
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-INIT-013 |
+| **Test Name**    | Init fails when source is not provided in config or CLI |
+| **Preconditions** | Configuration file has `[remote]` but no `[source]`, and `--source` is not passed on CLI. |
+| **Steps**        | 1. Run `incr-backup init` |
+| **Expected Result** | - Exit code 1. <br>- Error message: "source path is required. Set [source].path in config, --source flag, or INCR_BACKUP_SOURCE env var". |
+| **Category**     | unit |
+
+---
+
+### TC-INIT-014 — Init fails when remote path is missing
+
+| Field            | Value |
+|------------------|-------|
+| **Test ID**      | TC-INIT-014 |
+| **Test Name**    | Init fails when remote is not provided in config or CLI |
+| **Preconditions** | Configuration file has `[source]` but no `[remote]`, and `--remote` is not passed on CLI. |
+| **Steps**        | 1. Run `incr-backup init` |
+| **Expected Result** | - Exit code 1. <br>- Error message: "remote path is required. Set [remote].path in config, --remote flag, or INCR_BACKUP_REMOTE env var". |
+| **Category**     | unit |
+
+---
+
 ## 2. `sync` Command — Core Operation
 
 ### TC-SYNC-001 — First sync after init (no prior snapshots)
@@ -1535,7 +1587,7 @@
 
 | Section | ID Range | Count |
 |---------|----------|-------|
-| 1. `init` Command | TC-INIT-001 – TC-INIT-010 | 10 |
+| 1. `init` Command | TC-INIT-001 – TC-INIT-014 | 14 |
 | 2. `sync` — Core | TC-SYNC-001 – TC-SYNC-010 | 10 |
 | 3. `sync` — Rotation | TC-ROT-001 – TC-ROT-006 | 6 |
 | 4. `sync` — Cascade | TC-CASC-001 – TC-CASC-006 | 6 |

@@ -56,11 +56,15 @@ incr-backup --version
 ### 1. Initialize a Remote
 
 ```bash
-# Initialize a new backup
+# Initialize using settings from incr-backup.toml (or env vars):
+incr-backup init
+
+# OR initialize directly by specifying source and remote via CLI flags:
 incr-backup init --source /home/user/documents --remote gdrive:backups/myhost
 
 # OR adopt an existing 200 GB rclone directory with ZERO re-uploading:
-incr-backup init --source /home/user/documents --remote gdrive:backups/myhost --adopt
+incr-backup init --adopt
+# (or: incr-backup init --source /home/user/documents --remote gdrive:backups/myhost --adopt)
 ```
 
 ### 2. Run Syncs
@@ -207,7 +211,7 @@ CLI Flags > Environment Variables (`INCR_BACKUP_SOURCE`, etc.) > TOML Configurat
 Usage: incr-backup [OPTIONS] <COMMAND>
 
 Commands:
-  init     Initialize a new backup configuration (--source, --remote, --adopt, --retention)
+  init     Initialize a new backup configuration ([--source], [--remote], --adopt, --retention)
   sync     Run a sync operation (--level <hourly|daily|weekly|monthly>, --force-rotate, --force)
   list     List all snapshots (--json)
   status   Show backup status and storage summary
@@ -261,7 +265,7 @@ RUST_LOG=info cargo test -- --nocapture
 ```
 
 Test coverage includes:
-- **`test_init.rs`**: Basic init, adopt pre-existing files, duplicate protection, nonexistent source handling.
+- **`test_init.rs`**: Basic init, config-based init, adopt pre-existing files, duplicate protection, nonexistent source handling.
 - **`test_sync.rs`**: Full sync pipeline, incremental diff tracking, dry-run mode, status inspection.
 - **`test_restore.rs`**: Current restore, point-in-time restore from diffs, overwrite protection, checksum validation.
 - **`test_diff.rs`**: Added, modified, deleted file diff detection, stat summaries, and JSON serialization.

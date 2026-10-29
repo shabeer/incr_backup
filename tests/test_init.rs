@@ -274,3 +274,130 @@ fn test_init_fails_nonexistent_source() {
         .failure()
         .stderr(predicate::str::contains("source directory not found"));
 }
+
+#[test]
+fn test_init_from_config_file_without_flags() {
+    let env = TestEnv::new();
+    env.write_source_file("hello.txt", b"Hello from config");
+
+    let cfg_path = env.temp_dir.path().join("incr-backup.toml");
+    let toml = format!(
+        r#"[source]
+path = "{}"
+
+[remote]
+path = "{}"
+
+[retention]
+hourly = 4
+daily = 5
+weekly = 2
+monthly = 3
+min_interval_minutes = 30
+"#,
+        env.source_str(),
+        env.remote_str()
+    );
+    std::fs::write(&cfg_path, &toml).unwrap();
+
+    env.command()
+        .args(["-c", cfg_path.to_str().unwrap(), "init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Initialized"))
+        .stdout(predicate::str::contains("4h/5d/2w/3m (from config)"));
+
+    // Verify remote structure
+    assert!(env.remote_path.join("current").exists());
+    assert!(env.remote_path.join("diffs").exists());
+    assert!(env.remote_path.join(".meta").exists());
+    assert!(env.remote_path.join(".meta/config.json").exists());
+    assert!(env.remote_path.join(".meta/manifests/current.json").exists());
+
+    // Verify uploaded remote config matches local custom retention
+    let config_content = std::fs::read_to_string(env.remote_path.join(".meta/config.json")).unwrap();
+    assert!(config_content.contains("\"hourly\": 4"));
+    assert!(config_content.contains("\"daily\": 5"));
+}
+
+#[test]
+fn test_init_config_with_cli_override() {
+    let env = TestEnv::new();
+    env.write_source_file("hello.txt", b"Hello");
+
+    // Other source and remote directories
+    let other_source = env.temp_dir.path().join("other_source");
+    std::fs::create_dir_all(&other_source).unwrap();
+    std::fs::write(other_source.join("other.txt"), b"Other").unwrap();
+
+    let other_remote = env.temp_dir.path().join("other_remote");
+    std::fs::create_dir_all(&other_remote).unwrap();
+
+    let cfg_path = env.temp_dir.path().join("incr-backup.toml");
+    let toml = format!(
+        r#"[source]
+path = "{}"
+
+[remote]
+path = "{}"
+"#,
+        env.source_str(),
+        env.remote_str()
+    );
+    std::fs::write(&cfg_path, &toml).unwrap();
+
+    // Override remote via CLI flag
+    env.command()
+        .args([
+            "-c",
+            cfg_path.to_str().unwrap(),
+            "init",
+            "--remote",
+            other_remote.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Initialized"));
+
+    // other_remote should be initialized, not env.remote_path
+    assert!(other_remote.join("current").exists());
+    assert!(!env.remote_path.join("current").exists());
+}
+
+#[test]
+fn test_init_fails_when_source_missing() {
+    let env = TestEnv::new();
+    let cfg_path = env.temp_dir.path().join("no-source.toml");
+    let toml = format!(
+        r#"[remote]
+path = "{}"
+"#,
+        env.remote_str()
+    );
+    std::fs::write(&cfg_path, &toml).unwrap();
+
+    env.command()
+        .args(["-c", cfg_path.to_str().unwrap(), "init"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("source path is required"));
+}
+
+#[test]
+fn test_init_fails_when_remote_missing() {
+    let env = TestEnv::new();
+    let cfg_path = env.temp_dir.path().join("no-remote.toml");
+    let toml = format!(
+        r#"[source]
+path = "{}"
+"#,
+        env.source_str()
+    );
+    std::fs::write(&cfg_path, &toml).unwrap();
+
+    env.command()
+        .args(["-c", cfg_path.to_str().unwrap(), "init"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("remote path is required"));
+}

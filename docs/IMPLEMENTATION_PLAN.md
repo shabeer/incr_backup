@@ -210,7 +210,7 @@ The journal tracks this step. Re-running `incr-backup init --adopt` detects that
 
 ### Remote State Scenarios & Init/Adopt Decision Matrix
 
-Behavior of `incr-backup init --source <path> --remote <remote> [--adopt]`:
+Behavior of `incr-backup init [--source <path>] [--remote <remote>] [--adopt]` (source and remote may be specified via CLI flags, environment variables, or `incr-backup.toml` configuration):
 
 | Scenario | Remote Contents / State | Flag Passed | Expected Action | Exit Code | Message / Output |
 |---|---|:---:|---|:---:|---|
@@ -224,7 +224,7 @@ Behavior of `incr-backup init --source <path> --remote <remote> [--adopt]`:
 
 ```mermaid
 flowchart TD
-    Start["incr-backup init --source &lt;S&gt; --remote &lt;R&gt; [--adopt]"] --> CheckSource{"Source path exists?"}
+    Start["incr-backup init [--source &lt;S&gt;] [--remote &lt;R&gt;] [--adopt]"] --> CheckSource{"Source & remote resolved & source exists?"}
     CheckSource -- No --> ErrSource["Exit 1: Source directory not found"]
     CheckSource -- Yes --> ScanRemote["Inspect Remote Root via rclone lsf / lsjson"]
 
@@ -707,11 +707,11 @@ GLOBAL OPTIONS (apply to all commands):
 
 ```
 incr-backup init
-    --source <PATH>           Local source directory (required)
-    --remote <REMOTE>         rclone remote path (required)
+    --source <PATH>           Local source directory (optional if provided in config)
+    --remote <REMOTE>         rclone remote path (optional if provided in config)
     --adopt                   Adopt existing rclone-synced directory
                               (moves files server-side into current/, zero bandwidth)
-    --retention <PRESET>      Retention preset (see table below)
+    --retention <PRESET>      Retention preset (optional; defaults to config or 'default')
     --exclude <PATTERN>       Exclude pattern (repeatable)
 
 incr-backup sync

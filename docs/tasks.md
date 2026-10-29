@@ -45,7 +45,7 @@
 | 17 | Compilation Check | ✅ Done | `cargo check` clean (0 errors, 0 warnings) |
 | 18 | Linter Check | ✅ Done | `cargo clippy --all-targets` clean (0 warnings) |
 | 19 | Unit Tests Suite | ✅ Done | 75/75 unit tests passing |
-| 20 | `test_init.rs` Integration Tests | ✅ Done | 8/8 integration tests passing (basic, empty ignore adopt, adopt existing, reject without adopt, no-op double init, stray file warnings, partial structure overwrite, nonexistent source) |
+| 20 | `test_init.rs` Integration Tests | ✅ Done | 12/12 integration tests passing (basic, empty ignore adopt, adopt existing, reject without adopt, no-op double init, stray file warnings, partial structure overwrite, nonexistent source, config-based init without flags, CLI overrides, missing source/remote validation) |
 | 21 | `test_sync.rs` Integration Tests | ✅ Done | 2/2 integration tests passing (basic sync, incremental diffs, dry-run, list, status) |
 | 22 | `test_restore.rs` Integration Tests | ✅ Done | 3/3 integration tests passing (current, point-in-time from diffs, overwrite protection) |
 | 23 | `test_diff.rs` Integration Tests | ✅ Done | 1/1 integration tests passing (human-readable, --stat, --json) |
