@@ -11,7 +11,7 @@ use std::process;
 use clap::{Parser, Subcommand};
 use log::{error, info};
 
-use incr_backup::config::{CliOverrides, Config, RetentionConfig, RetentionPreset};
+use incr_backup::config::{CliOverrides, Config, RetentionConfig, RetentionPreset, SnapshotTimezone};
 use incr_backup::diff::{DiffOptions, run_diff};
 use incr_backup::error::IncrError;
 use incr_backup::manifest::{format_size, Manifest};
@@ -56,6 +56,16 @@ struct Cli {
     /// Extra flags passed to every rclone call.
     #[arg(long = "rclone-flags", env = "INCR_BACKUP_RCLONE_FLAGS", global = true)]
     rclone_flags: Option<String>,
+
+    /// Timezone for snapshot timestamps: "utc" or "local".
+    #[arg(
+        long = "timezone",
+        visible_alias = "tz",
+        env = "INCR_BACKUP_TIMEZONE",
+        value_enum,
+        global = true
+    )]
+    timezone: Option<SnapshotTimezone>,
 
     #[command(subcommand)]
     command: Commands,
@@ -350,6 +360,7 @@ fn load_config(cli: &Cli) -> incr_backup::error::Result<Config> {
         rclone_flags: cli.rclone_flags.clone(),
         verbose: Some(cli.verbose),
         dry_run: Some(cli.dry_run),
+        timezone: cli.timezone,
     };
 
     Ok(config.with_overrides(&overrides))
@@ -561,7 +572,7 @@ fn cmd_sync(
     };
 
     let now = chrono::Utc::now();
-    let timestamp = now.format("%Y-%m-%dT%H-%M").to_string();
+    let timestamp = config.timezone.format_datetime(now);
 
     let (backup_dir_name, was_update) = if should_rotate {
         if !config.dry_run {
@@ -1112,6 +1123,7 @@ fn cmd_config_pull(
         },
         verbose: config.verbose,
         dry_run: false,
+        timezone: config.timezone,
     };
 
     println!("Pulling configuration from {}:", meta_path);

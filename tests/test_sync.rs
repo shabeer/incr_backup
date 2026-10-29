@@ -124,3 +124,81 @@ fn test_sync_dry_run() {
         .stdout(predicate::str::contains("[DRY-RUN]"));
 }
 
+#[test]
+fn test_sync_timezone_arguments() {
+    let env = TestEnv::new();
+    env.write_source_file("doc1.txt", b"Initial content");
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str()])
+        .assert()
+        .success();
+
+    // 1. Sync with --timezone local (or --tz local)
+    env.write_source_file("doc1.txt", b"Local timezone sync");
+    env.command()
+        .args([
+            "sync",
+            "--source",
+            &env.source_str(),
+            "--remote",
+            &env.remote_str(),
+            "--level",
+            "hourly",
+            "--force-rotate",
+            "--timezone",
+            "local",
+        ])
+        .assert()
+        .success();
+
+    let diff_entries = std::fs::read_dir(env.remote_path.join("diffs")).unwrap();
+    let diff_dirs: Vec<String> = diff_entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+
+    assert!(!diff_dirs.is_empty(), "expected local diff directory to be created");
+    let local_snap = &diff_dirs[0];
+    assert!(
+        local_snap.contains('+') || local_snap.contains('-'),
+        "Local snapshot should contain numeric offset: {}",
+        local_snap
+    );
+    assert!(
+        !local_snap.contains(':'),
+        "Snapshot directory must not contain forbidden colons: {}",
+        local_snap
+    );
+
+    // 2. Sync with --tz utc
+    env.write_source_file("doc1.txt", b"UTC timezone sync");
+    env.command()
+        .args([
+            "sync",
+            "--source",
+            &env.source_str(),
+            "--remote",
+            &env.remote_str(),
+            "--level",
+            "hourly",
+            "--force-rotate",
+            "--tz",
+            "utc",
+        ])
+        .assert()
+        .success();
+
+    let diff_entries_2 = std::fs::read_dir(env.remote_path.join("diffs")).unwrap();
+    let diff_dirs_2: Vec<String> = diff_entries_2
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+
+    assert!(
+        diff_dirs_2.iter().any(|d| d.ends_with('Z')),
+        "At least one snapshot should end with Z (UTC indicator): {:?}",
+        diff_dirs_2
+    );
+}
+

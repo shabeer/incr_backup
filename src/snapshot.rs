@@ -20,7 +20,7 @@ use chrono::Utc;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 
-use crate::config::RetentionConfig;
+use crate::config::{RetentionConfig, SnapshotTimezone};
 use crate::manifest::Manifest;
 use crate::rclone::Rclone;
 use crate::error::{IncrError, Result};
@@ -479,31 +479,60 @@ impl<'a> RotationManager<'a> {
 
     /// Generate a backup directory name for a new snapshot.
     ///
-    /// Format: `hourly.0__2026-10-28T08-00`
-    pub fn get_backup_dir_name(tier: &SnapshotTier) -> String {
-        let timestamp = Utc::now().format("%Y-%m-%dT%H-%M").to_string();
+    /// Format: `hourly.0__2026-10-28T08-00Z` or `hourly.0__2026-10-28T13-30+0530`
+    pub fn get_backup_dir_name(tier: &SnapshotTier, tz: SnapshotTimezone) -> String {
+        let timestamp = tz.now_formatted();
         format!("{}.0__{}", tier.prefix(), timestamp)
     }
 }
 
-/// Parse a snapshot timestamp string into a DateTime.
+/// Parse a snapshot timestamp string into a DateTime<Utc>.
 ///
-/// Handles format: "2026-10-28T08-00" (hyphens instead of colons)
-fn parse_snapshot_timestamp(ts: &str) -> Option<chrono::DateTime<Utc>> {
-    // Convert "2026-10-28T08-00" back to "2026-10-28T08:00:00Z"
-    // The timestamp format uses hyphens instead of colons for filesystem safety
-    let normalized = if ts.len() >= 16 {
-        // "2026-10-28T08-00" → "2026-10-28T08:00"
-        let (date_part, time_part) = ts.split_at(11); // "2026-10-28T" + "08-00"
-        let time_fixed = time_part.replacen('-', ":", 1);
-        format!("{}{}:00Z", date_part, time_fixed)
-    } else {
-        format!("{}T00:00:00Z", ts)
-    };
+/// Handles:
+/// - Local with %z offset: "2026-10-29T09-49+0530"
+/// - UTC with 'Z' suffix: "2026-10-29T04-28Z"
+/// - Standard RFC3339: "2026-10-29T04:28:00Z"
+/// - Legacy hyphenated UTC without timezone: "2026-10-28T08-00"
+/// - Date-only: "2026-10-28"
+pub fn parse_snapshot_timestamp(ts: &str) -> Option<chrono::DateTime<Utc>> {
+    // 1. Try standard RFC3339 directly
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+        return Some(dt.with_timezone(&Utc));
+    }
 
-    chrono::DateTime::parse_from_rfc3339(&normalized)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
+    // 2. Try timezone-aware format with %z (e.g., "2026-10-29T09-49+0530")
+    if let Ok(dt) = chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H-%M%z") {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_str(ts, "%Y-%m-%dT%H-%M-%S%z") {
+        return Some(dt.with_timezone(&Utc));
+    }
+
+    // 3. Try UTC with 'Z' suffix (e.g., "2026-10-29T04-28Z")
+    if ts.ends_with('Z') || ts.ends_with('z') {
+        let without_z = &ts[..ts.len() - 1];
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(without_z, "%Y-%m-%dT%H-%M") {
+            return Some(dt.and_utc());
+        }
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(without_z, "%Y-%m-%dT%H-%M-%S") {
+            return Some(dt.and_utc());
+        }
+    }
+
+    // 4. Try legacy format without timezone (e.g., "2026-10-28T08-00")
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H-%M") {
+        return Some(dt.and_utc());
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H-%M-%S") {
+        return Some(dt.and_utc());
+    }
+
+    // 5. Try date-only (e.g., "2026-10-28")
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(ts, "%Y-%m-%d") {
+        return date.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc());
+    }
+
+    None
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -511,7 +540,7 @@ fn parse_snapshot_timestamp(ts: &str) -> Option<chrono::DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Datelike;
+    use chrono::{Datelike, Timelike};
 
     #[test]
     fn test_snapshot_tier_prefix() {
@@ -571,10 +600,26 @@ mod tests {
 
     #[test]
     fn test_parse_snapshot_timestamp() {
+        // Legacy format without timezone
         let dt = parse_snapshot_timestamp("2026-10-28T08-00").unwrap();
         assert_eq!(dt.year(), 2026);
         assert_eq!(dt.month(), 10);
         assert_eq!(dt.day(), 28);
+        assert_eq!(dt.hour(), 8);
+
+        // UTC with Z
+        let dt_z = parse_snapshot_timestamp("2026-10-28T08-00Z").unwrap();
+        assert_eq!(dt_z.year(), 2026);
+        assert_eq!(dt_z.month(), 10);
+        assert_eq!(dt_z.day(), 28);
+        assert_eq!(dt_z.hour(), 8);
+
+        // Local with offset +0530
+        let dt_offset = parse_snapshot_timestamp("2026-10-28T13-30+0530").unwrap();
+        assert_eq!(dt_offset.year(), 2026);
+        assert_eq!(dt_offset.month(), 10);
+        assert_eq!(dt_offset.day(), 28);
+        assert_eq!(dt_offset.hour(), 8); // 13:30 - 05:30 = 08:00 UTC
     }
 
     #[test]
@@ -588,6 +633,7 @@ mod tests {
             exclude: crate::config::ExcludeConfig::default(),
             verbose: 0,
             dry_run: true,
+            timezone: SnapshotTimezone::default(),
         });
         let mgr = RotationManager::new(&rclone, "test:backup", &retention);
 
@@ -599,9 +645,14 @@ mod tests {
 
     #[test]
     fn test_get_backup_dir_name_format() {
-        let name = RotationManager::get_backup_dir_name(&SnapshotTier::Hourly);
-        assert!(name.starts_with("hourly.0__"));
-        assert!(name.contains("T")); // has timestamp
+        let name_utc = RotationManager::get_backup_dir_name(&SnapshotTier::Hourly, SnapshotTimezone::Utc);
+        assert!(name_utc.starts_with("hourly.0__"));
+        assert!(name_utc.ends_with('Z'));
+
+        let name_local = RotationManager::get_backup_dir_name(&SnapshotTier::Hourly, SnapshotTimezone::Local);
+        assert!(name_local.starts_with("hourly.0__"));
+        assert!(name_local.contains('+') || name_local.contains('-'));
+        assert!(!name_local.contains(':'));
     }
 }
 

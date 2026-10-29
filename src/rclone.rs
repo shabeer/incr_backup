@@ -498,6 +498,7 @@ mod tests {
             exclude: crate::config::ExcludeConfig::default(),
             verbose: 0,
             dry_run: true, // always dry-run in tests
+            timezone: crate::config::SnapshotTimezone::default(),
         }
     }
 

@@ -346,9 +346,7 @@ impl<'a> SyncPipeline<'a> {
         start: Instant,
     ) -> Result<SyncResult> {
         let now = Utc::now();
-        // Timestamp format used in directory names: "2026-10-28T08-00"
-        // Colons replaced with hyphens for filesystem/URL safety.
-        let timestamp = now.format("%Y-%m-%dT%H-%M").to_string();
+        let timestamp = self.config.timezone.format_datetime(now);
 
         // ── Step 6: Rotate hourlies (if needed) ──────────────────────────
         let (backup_dir_name, was_update_in_place) = if should_rotate {

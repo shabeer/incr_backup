@@ -57,7 +57,8 @@
 | 29 | Release Build | ✅ Done | Optimized standalone binary produced at `target/release/incr-backup` (3.1 MB) |
 | 30 | Documentation | ✅ Done | Updated all markdown files (`README.md`, `walkthrough.md`, `TEST_CASES.md`, `tasks.md`, `IMPLEMENTATION_PLAN.md`) |
 | 31 | Total Test Count | ✅ Done | **102 passed / 0 failed** across all test suites (77 unit + 25 integration) |
+| 32 | Timezone in Snapshot Names | ✅ Done | Always use timezone (`Z` for UTC, `%z` for local), `--timezone`/`--tz` CLI flag, `INCR_BACKUP_TIMEZONE` env var, and `timezone` in config TOML |
 
 ---
 
-*Last updated: 2026-10-28T21:35+05:30*
+*Last updated: 2026-10-29T10:08+05:30*

@@ -21,6 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{IncrError, Result};
@@ -221,6 +222,58 @@ struct TomlRemote {
     path: String,
 }
 
+/// Timezone setting for snapshot timestamp formatting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotTimezone {
+    /// Coordinated Universal Time with 'Z' suffix (e.g., `2026-10-29T04-28Z`).
+    #[default]
+    Utc,
+    /// Local machine timezone with numeric offset (e.g., `2026-10-29T09-58+0530`).
+    Local,
+}
+
+impl SnapshotTimezone {
+    /// Format a UTC DateTime according to this timezone setting.
+    pub fn format_datetime(&self, dt: DateTime<Utc>) -> String {
+        match self {
+            SnapshotTimezone::Utc => dt.format("%Y-%m-%dT%H-%MZ").to_string(),
+            SnapshotTimezone::Local => {
+                dt.with_timezone(&Local).format("%Y-%m-%dT%H-%M%z").to_string()
+            }
+        }
+    }
+
+    /// Format the current time according to this timezone setting.
+    pub fn now_formatted(&self) -> String {
+        self.format_datetime(Utc::now())
+    }
+}
+
+impl std::str::FromStr for SnapshotTimezone {
+    type Err = IncrError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "utc" | "z" | "gmt" => Ok(SnapshotTimezone::Utc),
+            "local" => Ok(SnapshotTimezone::Local),
+            _ => Err(IncrError::InvalidConfig(format!(
+                "invalid timezone '{}': expected 'utc' or 'local'",
+                s
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for SnapshotTimezone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnapshotTimezone::Utc => write!(f, "utc"),
+            SnapshotTimezone::Local => write!(f, "local"),
+        }
+    }
+}
+
 /// Top-level TOML file structure matching `incr-backup.toml`.
 ///
 /// Used for deserializing and serializing configuration files.
@@ -232,6 +285,8 @@ struct TomlConfig {
     retention: Option<RetentionConfig>,
     rclone: Option<RcloneConfig>,
     exclude: Option<ExcludeConfig>,
+    #[serde(default)]
+    timezone: Option<SnapshotTimezone>,
 }
 
 // ─── CLI Override Arguments ─────────────────────────────────────────────────
@@ -266,6 +321,9 @@ pub struct CliOverrides {
 
     /// Enable dry-run mode (no mutations).
     pub dry_run: Option<bool>,
+
+    /// Override timezone for snapshot timestamps.
+    pub timezone: Option<SnapshotTimezone>,
 }
 
 // ─── Main Config ────────────────────────────────────────────────────────────
@@ -306,6 +364,9 @@ pub struct Config {
 
     /// Dry-run mode: show what would happen without making changes.
     pub dry_run: bool,
+
+    /// Timezone for snapshot timestamps (UTC or local).
+    pub timezone: SnapshotTimezone,
 }
 
 impl Config {
@@ -353,6 +414,7 @@ impl Config {
             exclude: toml_config.exclude.unwrap_or_default(),
             verbose: 0,
             dry_run: false,
+            timezone: toml_config.timezone.unwrap_or_default(),
         })
     }
 
@@ -369,9 +431,18 @@ impl Config {
             exclude: ExcludeConfig::default(),
             verbose: 0,
             dry_run: false,
+            timezone: SnapshotTimezone::default(),
         }
     }
+}
 
+impl Default for Config {
+    fn default() -> Self {
+        Self::default_config()
+    }
+}
+
+impl Config {
     /// Apply CLI and environment variable overrides to this configuration.
     ///
     /// Overrides follow a priority cascade:
@@ -424,6 +495,15 @@ impl Config {
         // Dry-run
         if let Some(dry_run) = overrides.dry_run {
             self.dry_run = dry_run;
+        }
+
+        // Timezone
+        if let Some(tz) = overrides.timezone {
+            self.timezone = tz;
+        } else if let Ok(env_tz) = std::env::var("INCR_BACKUP_TIMEZONE")
+            && let Ok(tz) = env_tz.parse::<SnapshotTimezone>()
+        {
+            self.timezone = tz;
         }
 
         self
@@ -532,6 +612,7 @@ impl Config {
             } else {
                 Some(self.exclude.clone())
             },
+            timezone: Some(self.timezone),
         };
 
         toml::to_string_pretty(&toml_config).map_err(|e| {
@@ -752,6 +833,7 @@ path = "gdrive:bak"
             rclone_flags: Some("--fast-list".to_string()),
             verbose: Some(2),
             dry_run: Some(true),
+            timezone: Some(SnapshotTimezone::Local),
         };
 
         let config = config.with_overrides(&overrides);
@@ -762,6 +844,7 @@ path = "gdrive:bak"
         assert_eq!(config.rclone.extra_flags, "--fast-list");
         assert_eq!(config.verbose, 2);
         assert!(config.dry_run);
+        assert_eq!(config.timezone, SnapshotTimezone::Local);
     }
 
     #[test]
@@ -798,6 +881,7 @@ path = "gdrive:original"
             exclude: ExcludeConfig::default(),
             verbose: 0,
             dry_run: false,
+            timezone: SnapshotTimezone::default(),
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -817,6 +901,7 @@ path = "gdrive:original"
             exclude: ExcludeConfig::default(),
             verbose: 0,
             dry_run: false,
+            timezone: SnapshotTimezone::default(),
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -842,6 +927,7 @@ path = "gdrive:original"
             exclude: ExcludeConfig::default(),
             verbose: 0,
             dry_run: false,
+            timezone: SnapshotTimezone::default(),
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -861,6 +947,7 @@ path = "gdrive:original"
             exclude: ExcludeConfig::default(),
             verbose: 0,
             dry_run: false,
+            timezone: SnapshotTimezone::default(),
         };
         let result = config.validate();
         assert!(result.is_err());
@@ -881,6 +968,7 @@ path = "gdrive:original"
             exclude: ExcludeConfig::default(),
             verbose: 0,
             dry_run: false,
+            timezone: SnapshotTimezone::default(),
         };
         assert!(config.validate().is_ok());
     }
@@ -903,6 +991,7 @@ path = "gdrive:original"
             },
             verbose: 2,
             dry_run: true,
+            timezone: SnapshotTimezone::default(),
         };
 
         let remote = config.to_remote_config();
@@ -956,12 +1045,14 @@ path = "gdrive:original"
             },
             verbose: 0,
             dry_run: false,
+            timezone: SnapshotTimezone::default(),
         };
 
         let toml_str = config.to_toml_string().unwrap();
         assert!(toml_str.contains("/data/docs"));
         assert!(toml_str.contains("gdrive:backups/host1"));
         assert!(toml_str.contains("hourly = 3"));
+        assert!(toml_str.contains("timezone = \"utc\""));
 
         // Verify it can be loaded back
         let mut tmp_file = tempfile::NamedTempFile::new().unwrap();
@@ -971,6 +1062,40 @@ path = "gdrive:original"
         assert_eq!(loaded.remote_path, "gdrive:backups/host1");
         assert_eq!(loaded.retention.hourly, 3);
         assert_eq!(loaded.exclude.patterns, vec!["*.tmp"]);
+        assert_eq!(loaded.timezone, SnapshotTimezone::Utc);
+    }
+
+    #[test]
+    fn test_snapshot_timezone_parse_and_format() {
+        use std::str::FromStr;
+
+        assert_eq!(SnapshotTimezone::from_str("utc").unwrap(), SnapshotTimezone::Utc);
+        assert_eq!(SnapshotTimezone::from_str("UTC").unwrap(), SnapshotTimezone::Utc);
+        assert_eq!(SnapshotTimezone::from_str("local").unwrap(), SnapshotTimezone::Local);
+        assert_eq!(SnapshotTimezone::from_str("LOCAL").unwrap(), SnapshotTimezone::Local);
+        assert!(SnapshotTimezone::from_str("invalid").is_err());
+
+        let now_utc = chrono::DateTime::parse_from_rfc3339("2026-10-29T04:28:00Z").unwrap().with_timezone(&Utc);
+        let utc_formatted = SnapshotTimezone::Utc.format_datetime(now_utc);
+        assert_eq!(utc_formatted, "2026-10-29T04-28Z");
+
+        let local_formatted = SnapshotTimezone::Local.format_datetime(now_utc);
+        assert!(local_formatted.starts_with("2026-10-29T"));
+        assert!(local_formatted.contains('+') || local_formatted.contains('-'));
+        assert!(!local_formatted.contains(':')); // No colons!
+    }
+
+    #[test]
+    fn test_snapshot_timezone_cli_override() {
+        let config = Config::default_config();
+        assert_eq!(config.timezone, SnapshotTimezone::Utc);
+
+        let overrides = CliOverrides {
+            timezone: Some(SnapshotTimezone::Local),
+            ..Default::default()
+        };
+        let config = config.with_overrides(&overrides);
+        assert_eq!(config.timezone, SnapshotTimezone::Local);
     }
 
     #[test]
