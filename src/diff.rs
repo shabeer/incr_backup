@@ -48,8 +48,8 @@ pub fn run_diff(config: &Config, rclone: &Rclone, options: &DiffOptions) -> Resu
         manifest_b.file_count
     );
 
-    // Compute diff using manifest module's diff_manifests
-    let diff = manifest::diff_manifests(&manifest_a, &manifest_b);
+    // Compute diff using manifest module's diff_manifests: target (snapshot_b) vs base (snapshot_a)
+    let diff = manifest::diff_manifests(&manifest_b, &manifest_a);
 
     // Format output
     if options.json_output {
@@ -104,7 +104,7 @@ fn format_diff(
 
     // Added files
     if !options.only_deleted && !options.only_modified && !diff.added.is_empty() {
-        output.push_str(&format!("Added (in {}, not in {}):\n", options.snapshot_a, options.snapshot_b));
+        output.push_str(&format!("Added (in {}, not in {}):\n", options.snapshot_b, options.snapshot_a));
         for f in &diff.added {
             output.push_str(&format!("  + {:<50} {}\n", f.path, format_size(f.size)));
         }
@@ -113,7 +113,7 @@ fn format_diff(
 
     // Deleted files
     if !options.only_added && !options.only_modified && !diff.deleted.is_empty() {
-        output.push_str(&format!("Deleted (in {}, not in {}):\n", options.snapshot_b, options.snapshot_a));
+        output.push_str(&format!("Deleted (in {}, not in {}):\n", options.snapshot_a, options.snapshot_b));
         for f in &diff.deleted {
             output.push_str(&format!("  - {:<50} {}\n", f.path, format_size(f.size)));
         }

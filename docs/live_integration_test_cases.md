@@ -187,6 +187,8 @@ All tests below have been executed and verified against the real Google Drive re
 | **LIV-04** | `test_live_sync_baseline_and_corner_cases` | Google Drive (`kaleemshabeer01_5TB_testing:`) | **PASSED** ✓ | 100.17s |
 | **LIV-05** | `test_live_sync_exclusions` | Google Drive (`kaleemshabeer01_5TB_testing:`) | **PASSED** ✓ | 81.59s |
 | **LIV-06** | `test_live_sync_dry_run` | Google Drive (`kaleemshabeer01_5TB_testing:`) | **PASSED** ✓ | 26.85s |
+| **LIV-08** | `test_live_list_and_diff` | Google Drive (`kaleemshabeer01_5TB_testing:`) | **PASSED** ✓ | 235.04s |
+| **LIV-09** | `test_live_restore_scenarios` | Google Drive (`kaleemshabeer01_5TB_testing:`) | **PASSED** ✓ | 223.15s |
 | **LIV-12** | `test_live_remove_file_across_snapshots` | Google Drive (`kaleemshabeer01_5TB_testing:`) | **PASSED** ✓ | 124.39s |
 | **LIV-13** | `test_live_remote_config_management` | Google Drive (`kaleemshabeer01_5TB_testing:`) | **PASSED** ✓ | 49.00s |
 | **LIV-14** | `test_live_lock_concurrency_and_override` | Google Drive (`kaleemshabeer01_5TB_testing:`) | **PASSED** ✓ | 94.01s |
