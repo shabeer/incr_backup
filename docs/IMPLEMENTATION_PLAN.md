@@ -265,15 +265,21 @@ Content A exists in two places — but they represent different timeline points 
 
 ### How Discrete Snapshots Work
 
-1. **Independent Timestamped Snapshots**:
-   - By default, each sync formats a snapshot name using filesystem-safe ISO-8601 timestamps:
+1. **Snapshot Naming (Automatic vs. Custom)**:
+   - **Default Timestamp Formatting**: By default, each sync formats a snapshot name using filesystem-safe ISO-8601 timestamps (colons replaced with hyphens):
      - UTC: `2026-10-28T08-00Z`
      - Local: `2026-10-28T13-30+0530`
-   - Alternatively, a custom name can be provided via `--name <custom-name>`.
-2. **Reverse-Incremental Diff Capture**:
+   - **Custom Names**: A custom name can be provided via `--name <custom-name>` (e.g., `pre-upgrade-v2`, `release-1.0`) during `sync`, or specified during `compact --name <name>`.
+   - **Validation Rules**: Names must be non-empty, must not contain path separators (`/` or `\`), must not begin with `.`, and cannot collide with existing snapshots outside the operation's scope.
+2. **Timestamp Identification via Manifest (`created_at`)**:
+   - The backup engine never relies on directory name string parsing to determine snapshot chronology.
+   - Every snapshot uploaded writes a manifest to `.meta/manifests/<snapshot_name>.json` storing the exact UTC timestamp in `created_at`.
+   - Consolidated snapshots produced by `compact` inherit the `created_at` timestamp of the anchor (newest) snapshot in the range.
+   - Commands (`list`, `restore`, `diff`, `compact`, `verify`) parse `manifest.created_at` to sort and query snapshots chronologically.
+3. **Reverse-Incremental Diff Capture**:
    - `rclone sync source current/ --backup-dir diffs/<snapshot_name>` uploads new/modified files to `current/` and moves pre-modification versions to `diffs/<snapshot_name>/`.
    - Files deleted from the source are preserved in `diffs/<snapshot_name>/`.
-3. **Dedicated Manifest**:
+4. **Dedicated Manifest**:
    - A complete manifest is uploaded to `.meta/manifests/<snapshot_name>.json` and `.meta/manifests/current.json`.
 
 ---

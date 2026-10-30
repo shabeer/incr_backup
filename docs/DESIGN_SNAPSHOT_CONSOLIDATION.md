@@ -278,6 +278,12 @@ Because the format is uniform:
   4. Releasing the remote lock.
 * Because compacted snapshots use the exact same directory layout and individual JSON manifests, `remove` treats them identically. Furthermore, compaction makes `remove` faster because there are fewer total diff directories and manifest files to traverse.
 
+### 8.4 Snapshot Naming and Timestamp Resolution
+* **Supported Naming Schemes:** Both automatic timestamp-based names (UTC `...Z` or local offset `...+0530`, filesystem-safe without colons `:`) and custom names via `--name <NAME>` (e.g. `pre-deploy`, `release-1.0`) are supported.
+* **Manifest Metadata as Source of Truth:** The backup engine never relies on parsing snapshot directory names to infer time. Every snapshot's manifest (`.meta/manifests/<name>.json`) explicitly stores the creation time in UTC under `created_at`.
+* **Consolidated Snapshot Timestamp:** The consolidated snapshot's manifest inherits the exact `created_at` timestamp of the anchor snapshot (the newest snapshot within the compacted range).
+* **Chronological Invariant:** Range filtering (`compact --from ... --to ...`), restore location resolution (scanning snapshots after target), and list sorting strictly sort by `manifest.created_at`.
+
 ---
 
 ## 9. Corner Cases, Failure Modes & Mitigations

@@ -14,6 +14,8 @@
 4. [Deep Dive: All Commands](#4-deep-dive-all-commands)
    - [init & init --adopt](#init--init---adopt)
    - [sync: Discrete Incremental Snapshots](#sync-discrete-incremental-snapshots)
+     - [Supported Snapshot Names (Default vs. Custom)](#supported-snapshot-names-default-vs-custom)
+     - [How Timestamps Are Identified for Custom Names](#how-timestamps-are-identified-for-custom-names)
    - [list & status](#list--status)
    - [diff between snapshots](#diff-between-snapshots)
    - [restore & location resolution](#restore--location-resolution)
@@ -233,25 +235,100 @@ Under **Dynamic Snapshot Consolidation**, every `sync` operation creates an appe
 
 1. **No Slot Limits or Rotation Overflow**: You can sync as often as you like (e.g. every 10 minutes, hourly, or before risky software deployments). There are no slot limits or destructive rotation cascades during sync.
 2. **Append-Only Immutability**: Previous snapshot manifests and diff directories are never modified or overwritten in-place during `sync`.
-3. **Optional Custom Snapshot Names**:
-   ```bash
-   # Standard timestamped snapshot (e.g. 2026-10-28T08-00Z)
-   incr-backup sync
 
-   # Custom named snapshot (e.g. before an OS update)
-   incr-backup sync --name pre-upgrade-v2
-   ```
+---
 
-#### Timezone in Snapshot Names:
-Every snapshot name embeds an unambiguous, filesystem-safe timestamp (no colons `:`). You can control whether timestamps reflect UTC or local time:
-- **`--timezone utc` (default)**: Appends `Z` (e.g. `2026-10-29T04-28Z`). Canonical for cloud and multi-machine environments.
-- **`--timezone local` (or `--tz local`)**: Embeds the local numeric offset (e.g. `2026-10-29T09-58+0530`), matching your local wall-clock cron schedule.
-- Can also be set via `INCR_BACKUP_TIMEZONE` or `timezone = "local"` (or `[snapshot] timezone = "local"`) in `incr-backup.toml`.
+#### Supported Snapshot Names: Default vs. Custom
+
+`incr-backup` supports two ways of naming snapshots:
+
+##### 1. Automatic Timestamp Names (Default)
+When `--name` is omitted, `sync` generates a filesystem-safe ISO-8601 timestamp name based on the configured timezone. All colons (`:`) are replaced with hyphens (`-`) for universal compatibility across Linux, macOS, Windows, Google Drive, S3, and FAT/NTFS filesystems:
+
+- **`--timezone utc` (default)**: Appends `Z` (e.g., `2026-10-29T04-28Z`). Recommended for cloud backups and multi-machine environments.
+- **`--timezone local` (or `--tz local`)**: Embeds the local numeric offset (e.g., `2026-10-29T09-58+0530`), matching your local wall-clock cron schedule.
+- Can also be set globally in `incr-backup.toml` (`timezone = "local"` or `[snapshot] timezone = "local"`) or via the `INCR_BACKUP_TIMEZONE` environment variable.
 
 ```bash
-# Sync with local timezone snapshot naming
+# Default UTC timestamp snapshot (e.g. 2026-10-29T04-28Z)
+incr-backup sync
+
+# Local timezone timestamp snapshot (e.g. 2026-10-29T09-58+0530)
 incr-backup sync --timezone local
 ```
+
+##### 2. Custom Snapshot Names
+You can assign an arbitrary, meaningful custom name to any snapshot using the `--name` option:
+
+```bash
+# Sync with custom name before a software deployment or OS upgrade
+incr-backup sync --name pre-upgrade-v2
+incr-backup sync --name release-v1.0
+
+# Compaction requires a name for the consolidated snapshot
+incr-backup compact --from 2026-10-28T00:00:00Z --to 2026-10-28T23:59:59Z --name daily-2026-10-28
+```
+
+##### Custom Name Validation Rules
+To ensure safety on local and cloud filesystems, custom snapshot names must satisfy:
+- Must not be empty.
+- Must not contain path separators (`/` or `\`).
+- Must not start with a dot (`.`).
+- Must not overwrite or collide with an existing snapshot outside the compaction range.
+
+---
+
+#### How Timestamps Are Identified for Custom Names
+
+If a snapshot has a custom name (e.g. `pre-upgrade-v2` or `daily-2026-10-28`), **how does the backup engine know when it was taken?**
+
+1. **Manifest Metadata as the Source of Truth (`created_at`)**:
+   Every snapshot — whether named automatically with a timestamp or given a custom name — has a companion JSON manifest uploaded to `.meta/manifests/<snapshot_name>.json`. Inside this manifest, the exact UTC creation timestamp is recorded in the `created_at` field:
+   ```json
+   {
+     "snapshot_name": "pre-upgrade-v2",
+     "created_at": "2026-10-29T04:28:15.123456789Z",
+     "files": [
+       { "path": "documents/report.pdf", "size": 1048576, "md5": "...", "mtime": "..." }
+     ],
+     "total_size": 1048576,
+     "file_count": 1
+   }
+   ```
+   *(For consolidated snapshots created by `compact`, the manifest inherits the `created_at` timestamp of the anchor snapshot — the newest snapshot within the compacted range).*
+
+2. **Chronological Sorting & Range Operations**:
+   The engine does **not** rely on parsing strings from snapshot directory names. When executing operations such as:
+   - `list` (chronological display)
+   - `restore` (identifying diff snapshots between the target point-in-time and `current/`)
+   - `compact` (filtering snapshots within `--from` and `--to` timestamp ranges)
+   - `verify` (validating snapshot sequence ordering)
+   
+   The engine calls `discover_all_snapshots`, reads each `.meta/manifests/<name>.json`, extracts `manifest.created_at`, and sorts all snapshots chronologically by that timestamp.
+
+3. **Inspecting Timestamps of Custom Snapshots**:
+   You can view the identified timestamp of any custom snapshot using:
+   - **`incr-backup list`**:
+     ```text
+     Snapshots at gdrive:backups/myhost:
+
+       pre-upgrade-v2 (42 files, 1.2 MB, 2026-10-29 09:58:15 +05:30)
+       daily-2026-10-28 (150 files, 5.4 GB, 2026-10-28 20:00:00 +05:30)
+     ```
+   - **`incr-backup list --json`**:
+     ```json
+     {
+       "name": "pre-upgrade-v2",
+       "timestamp": "2026-10-29T04:28:15Z",
+       "dir_name": "diffs/pre-upgrade-v2",
+       "files": 42,
+       "size": 1048576
+     }
+     ```
+   - **Direct Remote Manifest Inspection**:
+     ```bash
+     rclone cat gdrive:backups/myhost/.meta/manifests/pre-upgrade-v2.json
+     ```
 
 ---
 

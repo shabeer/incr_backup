@@ -72,7 +72,7 @@ incr-backup init --adopt
 ### 2. Run Syncs
 
 ```bash
-# Run incremental sync (creates an immutable, timestamped snapshot)
+# Run incremental sync (creates an immutable, timestamped snapshot, e.g. 2026-10-29T04-28Z)
 incr-backup sync
 
 # Run sync with custom snapshot name:
@@ -82,6 +82,9 @@ incr-backup sync --name release-v1.0
 incr-backup sync --timezone local
 # (or shorthand: --tz local)
 ```
+
+> [!NOTE]
+> Custom names are also assigned during `compact --name <name>`. Even with custom names, the exact creation timestamp is preserved in `.meta/manifests/<name>.json` (`created_at`), allowing `list`, `restore`, and `compact` to maintain accurate chronological ordering.
 
 ### 3. Inspect Status and Snapshots
 
@@ -182,8 +185,9 @@ incr-backup compact \
 Unlike traditional tools that force rigid slot counts (e.g. 6 hourly, 7 daily) leading to rotation overflows or in-place overwrites, `incr-backup` uses **Dynamic Snapshot Consolidation**:
 
 1. **Discrete Backups**: Every `sync` invocation creates an append-only snapshot directory in `diffs/<snapshot>/` with an immutable manifest in `.meta/manifests/<snapshot>.json`.
-2. **Explicit Compaction (`compact`)**: Use `incr-backup compact --from <start> --to <end> --name <consolidated_name>` to merge intermediate snapshots across any date range. Intermediate scratch changes are safely discarded and earliest diff references are preserved with zero data loss.
-3. **Decoupled Operation**: Fast syncs never block waiting for complex tier purges. Storage compaction runs on your schedule or via periodic cron maintenance.
+2. **Flexible Naming & Authoritative Timestamps**: Snapshot names default to timezone-formatted ISO timestamps (UTC `...Z` or local `...+0530`), but custom names (`--name pre-upgrade`) are fully supported. The manifest's `created_at` field acts as the immutable timestamp source of truth for chronological sorting, range compaction, and restore resolution.
+3. **Explicit Compaction (`compact`)**: Use `incr-backup compact --from <start> --to <end> --name <consolidated_name>` to merge intermediate snapshots across any date range. Intermediate scratch changes are safely discarded and earliest diff references are preserved with zero data loss.
+4. **Decoupled Operation**: Fast syncs never block waiting for complex tier purges. Storage compaction runs on your schedule or via periodic cron maintenance.
 
 ---
 

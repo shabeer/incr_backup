@@ -379,7 +379,7 @@
 | **Test Name**    | Sync with user-specified snapshot name |
 | **Preconditions** | Initialized namespace. Source has changes. |
 | **Steps**        | 1. Run `incr-backup sync --name pre-deploy` |
-| **Expected Result** | - Diffs are stored in `diffs/pre-deploy/`. <br>- Manifest created at `.meta/manifests/pre-deploy.json`. <br>- Exit code 0. |
+| **Expected Result** | - Diffs are stored in `diffs/pre-deploy/`. <br>- Manifest created at `.meta/manifests/pre-deploy.json`. <br>- Manifest records authoritative UTC creation timestamp in `created_at`. <br>- `incr-backup list` displays `pre-deploy` with formatted timestamp. <br>- Exit code 0. |
 | **Category**     | integration |
 
 ---
