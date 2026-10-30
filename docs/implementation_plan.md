@@ -2,7 +2,7 @@
 
 > Reverse-incremental snapshot backup for rclone cloud remotes (Google Drive, S3, etc.)
 > 
-> *Architecture updated: All tier rotations, slot limits, and in-place updates have been replaced by append-only discrete snapshots and dynamic snapshot consolidation (`compact`). See [DESIGN_SNAPSHOT_CONSOLIDATION.md](DESIGN_SNAPSHOT_CONSOLIDATION.md).*
+> *Architecture updated: All tier rotations, slot limits, and in-place updates have been replaced by append-only discrete snapshots and dynamic snapshot consolidation (`compact`). See [design_snapshot_consolidation.md](design_snapshot_consolidation.md).*
 
 ---
 
@@ -872,8 +872,8 @@ incr-backup/
 ├── Cargo.toml
 ├── README.md
 ├── docs/
-│   ├── IMPLEMENTATION_PLAN.md
-│   └── TEST_CASES.md
+│   ├── implementation_plan.md
+│   └── test_cases.md
 ├── src/
 │   ├── main.rs              # CLI entry point (clap derive)
 │   ├── lib.rs               # Library root, re-exports
@@ -1030,7 +1030,7 @@ incr-backup sync -s ~/Photos    -r gdrive:backups/photos
 
 ## Test Cases (112 Cases)
 
-Full test case documentation: [TEST_CASES.md](docs/TEST_CASES.md)
+Full test case documentation: [test_cases.md](test_cases.md)
 
 ### Summary
 
@@ -1116,7 +1116,7 @@ Full test case documentation: [TEST_CASES.md](docs/TEST_CASES.md)
 | 19 | "How to change retention presets of a backup?" | [`--retention` Presets & Lifecycle](#--retention-presets--lifecycle) |
 | 20 | "When does cleanup happen when moving from aggressive to minimal?" | [When Does Cleanup Happen](#when-does-cleanup-happen-eg-aggressive--minimal) |
 | 21 | "Can we auto-update remote metadata (.meta/config.json) based on current retention in config file? What could be cons?" | [Why No Silent Auto-Update on sync](#why-no-silent-auto-update-on-sync) — transient safety & conflict analysis |
-| 22 | "Implement config push, pull, diff with no auto-update & mismatch warnings" | [CLI Reference](#cli-reference) & [TEST_CASES.md Section 18](docs/TEST_CASES.md#18-config-command--local--remote-metadata-sync) |
+| 22 | "Implement config push, pull, diff with no auto-update & mismatch warnings" | [CLI Reference](#cli-reference) & [test_cases.md Section 18](test_cases.md#18-config-command--local--remote-metadata-sync) |
 | 23 | "Generate config/incr-backup-example.toml with rich documentation" | [Configuration File (`incr-backup-example.toml`)](config/incr-backup-example.toml) |
 
 ### Round 6 Comments (current)

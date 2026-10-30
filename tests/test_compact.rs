@@ -154,7 +154,7 @@ fn test_compact_single_snapshot() {
 fn test_compact_concrete_walkthrough_and_point_in_time_restore() {
     let env = TestEnv::new();
 
-    // Setup the exact scenario from DESIGN_SNAPSHOT_CONSOLIDATION.md Sections 2, 3, and 4:
+    // Setup the exact scenario from design_snapshot_consolidation.md Sections 2, 3, and 4:
     // Files: report.docx, budget.xlsx, logo.png
     // Versions:
     //   Day 1, 23:00 (day-2026-10-27): report=VA, budget=V1, logo=VL

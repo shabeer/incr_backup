@@ -290,8 +290,8 @@ Test coverage includes:
 
 - [**System Architecture & Algorithmic Walkthrough (`docs/walkthrough.md`)**](docs/walkthrough.md) — Comprehensive step-by-step walkthrough of algorithms, crash recovery, space calculation formulas, and remote layout diagrams.
 - [**Live Integration Test Cases (`docs/live_integration_test_cases.md`)**](docs/live_integration_test_cases.md) — Complete specification and execution logs for real cloud remote (Google Drive) testing and write-ahead journal interruption scenarios.
-- [**Design: Dynamic Snapshot Consolidation (`docs/DESIGN_SNAPSHOT_CONSOLIDATION.md`)**](docs/DESIGN_SNAPSHOT_CONSOLIDATION.md) — Architecture and design rationale for dynamic snapshot consolidation.
-- [**Test Cases Reference (`docs/TEST_CASES.md`)**](docs/TEST_CASES.md) — Formal specification for all unit, integration, and corner-case test plans.
+- [**Design: Dynamic Snapshot Consolidation (`docs/design_snapshot_consolidation.md`)**](docs/design_snapshot_consolidation.md) — Architecture and design rationale for dynamic snapshot consolidation.
+- [**Test Cases Reference (`docs/test_cases.md`)**](docs/test_cases.md) — Formal specification for all unit, integration, and corner-case test plans.
 
 ---
 
