@@ -1,6 +1,6 @@
 # incr-backup — Comprehensive Test Cases
 
-> **Project:** incr-backup (rsnapshot-like incremental backup for rclone Google Drive remotes)
+> **Project:** incr-backup (Reverse-incremental backup and point-in-time restore with dynamic snapshots for rclone remotes)
 > **Version:** 0.1.0-draft
 > **Last Updated:** 2026-10-28
 

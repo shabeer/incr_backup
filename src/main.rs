@@ -1,6 +1,6 @@
 //! # incr-backup — CLI Entry Point
 //!
-//! rsnapshot-like incremental backups for rclone remotes.
+//! Reverse-incremental backup and point-in-time restore with dynamic snapshots for rclone remotes.
 //!
 //! This binary uses `clap` derive macros for argument parsing and dispatches
 //! to the library modules for each subcommand.
@@ -20,7 +20,7 @@ use incr_backup::remove::{RemoveOptions, run_remove};
 use incr_backup::restore::{RestoreOptions, run_restore};
 use incr_backup::verify::{VerifyOptions, format_verify_result, run_verify};
 
-/// incr-backup — rsnapshot-like incremental backups for rclone remotes.
+/// incr-backup — Reverse-incremental backup and point-in-time restore with dynamic snapshots for rclone remotes.
 ///
 /// Backs up local directories to rclone remotes using reverse-incremental
 /// snapshots. The `current/` directory on the remote is always a full

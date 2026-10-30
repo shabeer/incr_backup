@@ -1,7 +1,7 @@
 # ==============================================================================
 # incr-backup Configuration File
 # ==============================================================================
-# Reverse-incremental, rsnapshot-style backups for rclone remotes.
+# Reverse-incremental backup and point-in-time restore with dynamic snapshots for rclone remotes.
 #
 # Configuration Priority (highest to lowest):
 #   1. CLI arguments (--source, --remote, etc.)

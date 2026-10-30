@@ -2,7 +2,7 @@
 name = "incr-backup"
 version = "0.1.0"
 edition = "2024"
-description = "rsnapshot-like incremental backups for rclone remotes"
+description = "Reverse-incremental backup and point-in-time restore with dynamic snapshots for rclone remotes"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }

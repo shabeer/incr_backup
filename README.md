@@ -4,9 +4,9 @@
 [![Tests](https://img.shields.io/badge/tests-118%20passed-brightgreen.svg)]()
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)]()
 
-> **Reverse-incremental snapshot backup orchestration for rclone cloud remotes (Google Drive, S3, etc.).**
+> **Reverse-incremental backup and point-in-time restore with dynamic snapshots for rclone remotes (Google Drive, S3, etc.).**
 
-`incr-backup` brings **rsnapshot-style** incremental snapshot backups to cloud storage without proprietary chunked containers. The latest state (`current/`) is **always directly browseable and downloadable** on Google Drive. Old versions and deleted files are preserved in timestamped snapshot directories using **zero-bandwidth server-side moves**.
+`incr-backup` provides **reverse-incremental backup and point-in-time restore with dynamic snapshots for rclone remotes** without proprietary chunked containers. The latest state (`current/`) is **always directly browseable and downloadable** on Google Drive. Old versions and deleted files are preserved in timestamped snapshot directories using **zero-bandwidth server-side moves**.
 
 ---
 

@@ -116,7 +116,7 @@ Where:
 | Approach | Space Used | Ratio |
 |---|---|---|
 | **incr-backup (this tool)** | ~211 GB | **1.06×** source |
-| rsnapshot with hard links (local) | ~211 GB | 1.06× (same efficiency) |
+| Hard-link incremental backup (local) | ~211 GB | 1.06× (same efficiency) |
 | Naive full copies (23 snapshots) | 4,600 GB | 23× source |
 
 ---
@@ -911,7 +911,7 @@ incr-backup/
 name = "incr-backup"
 version = "0.1.0"
 edition = "2024"
-description = "rsnapshot-like incremental backups for rclone remotes"
+description = "Reverse-incremental backup and point-in-time restore with dynamic snapshots for rclone remotes"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
