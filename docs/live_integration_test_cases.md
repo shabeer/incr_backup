@@ -137,7 +137,15 @@ Test file: [`tests/test_live_gdrive.rs`](file:///Users/shabeer/git/shabeer_incr_
 
 ## 6. How to Run the Tests
 
-### Prerequisites
+Live Google Drive tests interact with real cloud infrastructure over the network and are marked `#[ignore]` by default so standard `cargo test` runs quickly (in ~20 seconds) without hitting remote API rate limits.
+
+### Standard Test Suite (Fast Unit & Local Integration Tests)
+Runs all unit tests and local filesystem integration tests:
+```bash
+cargo test -- --nocapture
+```
+
+### Prerequisites for Live Cloud Tests
 1. Ensure `rclone` is available at `/Users/Shared/bin/rclone_all_allowed` with Google Drive remote `kaleemshabeer01_5TB_testing:`.
 2. Clear `RUSTC_WRAPPER` to bypass sccache if required in the environment.
 
@@ -146,7 +154,7 @@ Test file: [`tests/test_live_gdrive.rs`](file:///Users/shabeer/git/shabeer_incr_
 DEVELOPER_DIR=/Library/Developer/CommandLineTools \
 SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
 RUSTC_WRAPPER="" \
-cargo test --test test_journal_recovery -- --nocapture
+cargo test --test test_journal_recovery -- --nocapture --ignored
 ```
 
 ### Run Live Google Drive Integration Tests
@@ -154,7 +162,7 @@ cargo test --test test_journal_recovery -- --nocapture
 DEVELOPER_DIR=/Library/Developer/CommandLineTools \
 SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
 RUSTC_WRAPPER="" \
-cargo test --test test_live_gdrive -- --nocapture
+cargo test --test test_live_gdrive -- --nocapture --ignored
 ```
 
 ### Run Specific Test Case (e.g. Live Google Drive Crash Recovery)
@@ -162,7 +170,7 @@ cargo test --test test_live_gdrive -- --nocapture
 DEVELOPER_DIR=/Library/Developer/CommandLineTools \
 SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
 RUSTC_WRAPPER="" \
-cargo test --test test_journal_recovery -- test_live_journal_recovery_on_google_drive --nocapture
+cargo test --test test_journal_recovery -- test_live_journal_recovery_on_google_drive --nocapture --ignored
 ```
 
 ---

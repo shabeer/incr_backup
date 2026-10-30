@@ -145,30 +145,37 @@ impl LiveGdriveTestEnv {
             return None;
         }
 
-        // Check connectivity to the remote
-        let mut probe_cmd = StdCommand::new(&rclone_path);
-        probe_cmd.args(["lsd", &base_remote]);
-        for flag in &rclone_flags {
-            probe_cmd.arg(flag);
-        }
-        probe_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        // Check connectivity to the remote (cached once across test runs)
+        static PROBE_RESULT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let is_reachable = *PROBE_RESULT.get_or_init(|| {
+            let mut probe_cmd = StdCommand::new(&rclone_path);
+            probe_cmd.args(["lsd", &base_remote]);
+            for flag in &rclone_flags {
+                probe_cmd.arg(flag);
+            }
+            probe_cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
-        match probe_cmd.status() {
-            Ok(status) if status.success() => {}
-            Ok(status) => {
-                eprintln!(
-                    "Skipping live test: remote {} unreachable (rclone exit: {})",
-                    base_remote, status
-                );
-                return None;
+            match probe_cmd.status() {
+                Ok(status) if status.success() => true,
+                Ok(status) => {
+                    eprintln!(
+                        "Skipping live test: remote {} unreachable (rclone exit: {})",
+                        base_remote, status
+                    );
+                    false
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Skipping live test: failed to probe remote {}: {}",
+                        base_remote, e
+                    );
+                    false
+                }
             }
-            Err(e) => {
-                eprintln!(
-                    "Skipping live test: failed to probe remote {}: {}",
-                    base_remote, e
-                );
-                return None;
-            }
+        });
+
+        if !is_reachable {
+            return None;
         }
 
         let temp_dir = TempDir::new().expect("failed to create temp dir");

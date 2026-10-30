@@ -39,6 +39,7 @@ use std::fs;
 // ─── 1. Configuration & Status ───────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_config_and_status() {
     let Some(env) = LiveGdriveTestEnv::new("config_status") else {
         eprintln!("Skipping test_live_config_and_status: Google Drive remote unreachable");
@@ -58,6 +59,7 @@ fn test_live_config_and_status() {
 // ─── 2. Clean Init & Idempotency ────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_init_clean_and_idempotent() {
     let Some(env) = LiveGdriveTestEnv::new("init_idempotent") else {
         eprintln!("Skipping test_live_init_clean_and_idempotent: Google Drive remote unreachable");
@@ -95,6 +97,7 @@ fn test_live_init_clean_and_idempotent() {
 // ─── 3. Adopt Existing Remote Files ─────────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_init_adopt_existing() {
     let Some(env) = LiveGdriveTestEnv::new("init_adopt") else {
         eprintln!("Skipping test_live_init_adopt_existing: Google Drive remote unreachable");
@@ -103,7 +106,6 @@ fn test_live_init_adopt_existing() {
 
     // Pre-populate a file directly in remote current/
     let current_path = format!("{}/current/pre_existing.txt", env.remote_str());
-    let _ = env.rclone_exec(&["rcat", &current_path]); // create via rcat or copy
     // Write via stdin
     let mut cmd = std::process::Command::new(&env.rclone_path);
     cmd.args(["rcat", &current_path]);
@@ -138,6 +140,7 @@ fn test_live_init_adopt_existing() {
 // ─── 4. Baseline Sync with All Corner Cases ─────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_sync_baseline_and_corner_cases() {
     let Some(env) = LiveGdriveTestEnv::new("sync_baseline") else {
         eprintln!("Skipping test_live_sync_baseline_and_corner_cases: Google Drive remote unreachable");
@@ -218,6 +221,7 @@ fn test_live_sync_baseline_and_corner_cases() {
 // ─── 5. Exclusion Patterns Enforcement ──────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_sync_exclusions() {
     let Some(env) = LiveGdriveTestEnv::new("sync_exclusions") else {
         eprintln!("Skipping test_live_sync_exclusions: Google Drive remote unreachable");
@@ -264,6 +268,7 @@ fn test_live_sync_exclusions() {
 // ─── 6. Dry Run Verification ────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_sync_dry_run() {
     let Some(env) = LiveGdriveTestEnv::new("dry_run") else {
         eprintln!("Skipping test_live_sync_dry_run: Google Drive remote unreachable");
@@ -293,6 +298,7 @@ fn test_live_sync_dry_run() {
 // ─── 7. Reverse-Incremental Rotation & Diff Archiving ───────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_sync_reverse_incremental_rotation() {
     let Some(env) = LiveGdriveTestEnv::new("reverse_incr") else {
         eprintln!("Skipping test_live_sync_reverse_incremental_rotation: Google Drive remote unreachable");
@@ -390,6 +396,7 @@ fn test_live_sync_reverse_incremental_rotation() {
 // ─── 8. List & Diff Subcommands ─────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_list_and_diff() {
     let Some(env) = LiveGdriveTestEnv::new("list_diff") else {
         eprintln!("Skipping test_live_list_and_diff: Google Drive remote unreachable");
@@ -466,6 +473,7 @@ fn test_live_list_and_diff() {
 // ─── 9. Restore Scenarios ───────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_restore_scenarios() {
     let Some(env) = LiveGdriveTestEnv::new("restore_scenarios") else {
         eprintln!("Skipping test_live_restore_scenarios: Google Drive remote unreachable");
@@ -561,6 +569,7 @@ fn test_live_restore_scenarios() {
 // ─── 10. Verify Integrity ───────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_verify_integrity() {
     let Some(env) = LiveGdriveTestEnv::new("verify_integrity") else {
         eprintln!("Skipping test_live_verify_integrity: Google Drive remote unreachable");
@@ -596,6 +605,7 @@ fn test_live_verify_integrity() {
 // ─── 11. Snapshot Compaction ────────────────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_snapshot_compaction() {
     let Some(env) = LiveGdriveTestEnv::new("compaction") else {
         eprintln!("Skipping test_live_snapshot_compaction: Google Drive remote unreachable");
@@ -660,6 +670,7 @@ fn test_live_snapshot_compaction() {
 // ─── 12. Remote Removal Across Snapshots ────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_remove_file_across_snapshots() {
     let Some(env) = LiveGdriveTestEnv::new("remove_purge") else {
         eprintln!("Skipping test_live_remove_file_across_snapshots: Google Drive remote unreachable");
@@ -701,6 +712,7 @@ fn test_live_remove_file_across_snapshots() {
 // ─── 13. Config Management (Push, Diff, Pull) ───────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_remote_config_management() {
     let Some(env) = LiveGdriveTestEnv::new("config_mgmt") else {
         eprintln!("Skipping test_live_remote_config_management: Google Drive remote unreachable");
@@ -742,6 +754,7 @@ fn test_live_remote_config_management() {
 // ─── 14. Lock Concurrency & Force Override ──────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
 fn test_live_lock_concurrency_and_override() {
     let Some(env) = LiveGdriveTestEnv::new("lock_concurrency") else {
         eprintln!("Skipping test_live_lock_concurrency_and_override: Google Drive remote unreachable");

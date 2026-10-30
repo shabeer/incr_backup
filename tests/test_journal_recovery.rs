@@ -371,6 +371,7 @@ fn test_journal_recovery_corrupt_journal() {
 // ─── 8. Live Google Drive Crash Recovery ────────────────────────────────────
 
 #[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_journal_recovery -- --ignored)"]
 fn test_live_journal_recovery_on_google_drive() {
     let Some(env) = LiveGdriveTestEnv::new("gdrive_crash_rec") else {
         eprintln!("Skipping test_live_journal_recovery_on_google_drive: Google Drive remote unreachable");
