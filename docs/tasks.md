@@ -62,7 +62,7 @@
 | 29 | `test_compact.rs` Integration Tests | ✅ Done | 5/5 integration tests passing |
 | 30 | `test_config.rs` Integration Tests | ✅ Done | 2/2 integration tests passing (push, pull, diff, mismatch warning, overwrite guard, timezone) |
 | 31 | Release Build | ✅ Done | Optimized standalone binary produced at `target/release/incr-backup` (3.1 MB) |
-| 32 | Documentation | ✅ Done | Updated all markdown files (`README.md`, `walkthrough.md`, `TEST_CASES.md`, `tasks.md`, `IMPLEMENTATION_PLAN.md`) |
+| 32 | Documentation | ✅ Done | Updated all markdown files (`README.md`, `docs/walkthrough.md`, `docs/live_integration_test_cases.md`, `docs/TEST_CASES.md`, `docs/tasks.md`, `docs/IMPLEMENTATION_PLAN.md`) |
 | 33 | Total Test Count | ✅ Done | **109 passed / 0 failed** across all test suites (71 unit + 38 integration) |
 | 34 | Retention & Tier Removal | ✅ Done | Removed all concepts of retention, tier cascading, and slot rotation overflow; transitioned completely to dynamic snapshot consolidation |
 

@@ -1,0 +1,120 @@
+# ==============================================================================
+# incr-backup Configuration File
+# ==============================================================================
+# Reverse-incremental backup and point-in-time restore with dynamic snapshots for rclone remotes.
+#
+# Configuration Priority (highest to lowest):
+#   1. CLI arguments (--source, --remote, etc.)
+#   2. Environment variables (INCR_BACKUP_SOURCE, INCR_BACKUP_REMOTE, etc.)
+#   3. This TOML configuration file
+#   4. Built-in defaults
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Timezone Setting for Snapshot Names
+# ------------------------------------------------------------------------------
+# Timezone used in snapshot timestamps: "utc" or "local".
+#   - "utc" (default): generates timestamps like 2026-10-29T04-28Z
+#   - "local": generates timestamps with local offset like 2026-10-29T09-58+0530
+# Can also be overridden with --timezone <utc|local> / --tz <utc|local> or INCR_BACKUP_TIMEZONE.
+timezone = "local"
+
+
+# ------------------------------------------------------------------------------
+# [source] — Local Directory to Back Up
+# ------------------------------------------------------------------------------
+[source]
+# Absolute or relative path to the local directory you want to back up.
+# Must be an existing directory on the local filesystem.
+#
+# Examples:
+#   path = "/home/alice/documents"
+#   path = "/Users/alice/Projects"
+#   path = "./data"
+#   path = "C:\\Users\\alice\\Documents"
+path = "/tmp/incr_backup_testing/"
+
+
+# ------------------------------------------------------------------------------
+# [remote] — Rclone Destination
+# ------------------------------------------------------------------------------
+[remote]
+# Rclone remote path where the backup will be stored.
+# The remote will contain:
+#   - current/   (the live mirror, directly browsable in cloud storage)
+#   - diffs/     (reverse-incremental historical snapshots)
+#   - .meta/     (manifests, locks, and config metadata)
+#
+# Examples:
+#   Google Drive:  path = "gdrive:backups/myhost"
+#   Amazon S3:     path = "s3:my-backup-bucket/myhost"
+#   Dropbox:       path = "dropbox:backups/myhost"
+#   Local / NAS:   path = "/Volumes/BackupDrive/myhost"
+#   SFTP:          path = "myserver:/var/backups/myhost"
+path = "kaleemshabeer01_5TB_testing:"
+
+# ------------------------------------------------------------------------------
+# [rclone] — Rclone Transport Options
+# ------------------------------------------------------------------------------
+[rclone]
+# Path to the rclone executable. Defaults to "rclone" (resolved via PATH).
+#
+# Examples:
+#   path = "rclone"
+#   path = "/usr/local/bin/rclone"
+#   path = "/opt/homebrew/bin/rclone"
+#   path = "C:\\Tools\\rclone\\rclone.exe"
+path = "/Users/Shared/bin/rclone_all_allowed"
+
+# Extra command-line flags passed to every rclone invocation.
+# Useful for tuning throughput, API limits, or specifying a custom rclone config.
+#
+# Common Examples:
+#   High-speed transfers:      extra_flags = "--transfers 8 --checkers 16"
+#   Google Drive optimizations: extra_flags = "--drive-acknowledge-abuse --fast-list"
+#   Bandwidth rate limiting:   extra_flags = "--bwlimit 10M"
+#   Custom config file:        extra_flags = "--config /home/user/.config/rclone/rclone.conf"
+#   Disable cloud trash:       extra_flags = "--drive-use-trash=false"
+# Note: do not pass --exclude-from because it is only applicable to sync, below extra_flags is applied to all rclone cmds
+# Use exclude.patterns below instead
+extra_flags = "-v --delete-excluded --delete-before --transfers 16 --checkers 32 --no-update-dir-modtime --drive-chunk-size 64M --fast-list --links --drive-use-trash=false "
+
+
+# ------------------------------------------------------------------------------
+# [exclude] — Exclusion Patterns
+# ------------------------------------------------------------------------------
+# List of glob patterns to exclude from backup.
+# Uses rclone filter syntax:
+#   - `*.ext` matches any file ending with .ext
+#   - `dir/**` matches directory `dir` and everything inside it
+#   - `/top` matches `top` only at the root of the source directory
+# ------------------------------------------------------------------------------
+[exclude]
+patterns = [
+    # OS metadata and temporary files
+    "*.tmp",
+    "*.temp",
+    "*.swp",
+    "*~",
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+
+    # Package managers and build artifacts
+    "node_modules/**",
+    "target/**",
+    "__pycache__/**",
+    "*.pyc",
+    ".venv/**",
+    ".tox/**",
+    "dist/**",
+    "build/**",
+
+    # Version control internal directories (optional, remove if you want full repo backups)
+    # ".git/**",
+
+    # Logs and caches
+    "*.log",
+    ".cache/**"
+]
+
