@@ -13,8 +13,6 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -300,81 +298,24 @@ impl DiffResult {
     }
 }
 
+pub use common::format::format_size;
+
 /// Compare two manifests, like a "git diff --stat" between snapshots.
 ///
-/// ## Algorithm (similar to Python dict comparison)
-/// ```python
-/// map_a = {f.path: f for f in manifest_a.files}
-/// map_b = {f.path: f for f in manifest_b.files}
-/// added    = [f for p, f in map_a.items() if p not in map_b]
-/// deleted  = [f for p, f in map_b.items() if p not in map_a]
-/// modified = [(map_a[p], map_b[p]) for p in map_a if p in map_b and map_a[p].md5 != map_b[p].md5]
-/// ```
-///
-/// ## Arguments
-/// * `a` — The "newer" manifest (e.g., hourly.0)
-/// * `b` — The "older" manifest (e.g., daily.0)
-///
-/// ## Returns
-/// A `DiffResult` with categorized changes.
+/// Uses the generic collection diff engine from [`common::diff`].
 pub fn diff_manifests(a: &Manifest, b: &Manifest) -> DiffResult {
-    // Build HashMaps for O(1) lookup — like Python's dict comprehension
-    // `{f.path: f for f in manifest.files}`
-    let map_a: HashMap<&str, &FileEntry> = a.files.iter().map(|f| (f.path.as_str(), f)).collect();
-    let map_b: HashMap<&str, &FileEntry> = b.files.iter().map(|f| (f.path.as_str(), f)).collect();
+    let diff = common::diff::diff_collections(
+        &b.files,
+        &a.files,
+        |f| f.path.as_str(),
+        |f| f.md5.as_str(),
+    );
 
-    let mut result = DiffResult::default();
-
-    // Check files in A against B
-    for (path, entry_a) in &map_a {
-        match map_b.get(path) {
-            None => {
-                // In A but not B → added
-                result.added.push((*entry_a).clone());
-            }
-            Some(entry_b) if entry_a.md5 != entry_b.md5 => {
-                // In both but different content → modified
-                result
-                    .modified
-                    .push(((*entry_a).clone(), (*entry_b).clone()));
-            }
-            _ => {
-                // Same content → unchanged
-                result.unchanged += 1;
-            }
-        }
-    }
-
-    // Check files in B but not in A → deleted
-    for (path, entry_b) in &map_b {
-        if !map_a.contains_key(path) {
-            result.deleted.push((*entry_b).clone());
-        }
-    }
-
-    result
-}
-
-/// Format a file size in human-readable form.
-///
-/// Examples: "1.5 MB", "840.0 KB", "3.2 GB", "128 B"
-pub fn format_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    const TB: f64 = GB * 1024.0;
-
-    let b = bytes as f64;
-    if b >= TB {
-        format!("{:.1} TB", b / TB)
-    } else if b >= GB {
-        format!("{:.1} GB", b / GB)
-    } else if b >= MB {
-        format!("{:.1} MB", b / MB)
-    } else if b >= KB {
-        format!("{:.1} KB", b / KB)
-    } else {
-        format!("{} B", bytes)
+    DiffResult {
+        added: diff.added,
+        deleted: diff.deleted,
+        modified: diff.modified.into_iter().map(|(old, new)| (new, old)).collect(),
+        unchanged: diff.unchanged.len(),
     }
 }
 

@@ -173,6 +173,91 @@ pub enum IncrError {
     Toml(#[from] toml::de::Error),
 }
 
+impl From<common::time::TimeError> for IncrError {
+    fn from(err: common::time::TimeError) -> Self {
+        IncrError::InvalidConfig(err.to_string())
+    }
+}
+
+impl From<common::lock::LockError> for IncrError {
+    fn from(err: common::lock::LockError) -> Self {
+        match err {
+            common::lock::LockError::Locked { holder, since } => {
+                IncrError::Locked { holder, since }
+            }
+            common::lock::LockError::CorruptLock(s) => IncrError::CorruptLock(s),
+            common::lock::LockError::Backend(s) => IncrError::Config(s),
+        }
+    }
+}
+
+impl From<common::journal::JournalError> for IncrError {
+    fn from(err: common::journal::JournalError) -> Self {
+        match err {
+            common::journal::JournalError::IncompleteJournal {
+                operation,
+                started_at,
+            } => IncrError::IncompleteJournal {
+                operation,
+                started_at,
+            },
+            common::journal::JournalError::CorruptJournal(s) => IncrError::CorruptJournal(s),
+            common::journal::JournalError::Backend(s) => IncrError::Config(s),
+            common::journal::JournalError::StepNotFound(s) => {
+                IncrError::CorruptJournal(format!("step '{s}' not found in journal"))
+            }
+            common::journal::JournalError::NoActiveJournal => {
+                IncrError::CorruptJournal("no active journal to update".to_string())
+            }
+        }
+    }
+}
+
+impl From<common::config::ConfigError> for IncrError {
+    fn from(err: common::config::ConfigError) -> Self {
+        match err {
+            common::config::ConfigError::FileNotFound(path) => {
+                IncrError::Config(format!("config file not found: {}", path.display()))
+            }
+            common::config::ConfigError::ReadError { path, reason } => {
+                IncrError::Config(format!("cannot read '{}': {}", path.display(), reason))
+            }
+            common::config::ConfigError::InvalidContent(s) => IncrError::Config(s),
+            common::config::ConfigError::InvalidField { field, reason } => {
+                IncrError::InvalidConfig(format!("invalid field '{field}': {reason}"))
+            }
+            common::config::ConfigError::Validation(s) => IncrError::InvalidConfig(s),
+        }
+    }
+}
+
+impl From<common::subprocess::SubprocessError> for IncrError {
+    fn from(err: common::subprocess::SubprocessError) -> Self {
+        match err {
+            common::subprocess::SubprocessError::NotFound { binary, source } => {
+                IncrError::RcloneNotFound {
+                    path: binary,
+                    source,
+                }
+            }
+            common::subprocess::SubprocessError::Failed { cmd, code, stderr } => {
+                IncrError::RcloneFailed { cmd, code, stderr }
+            }
+            common::subprocess::SubprocessError::Io(e) => IncrError::Io(e),
+        }
+    }
+}
+
+impl From<common::fs::ScanError> for IncrError {
+    fn from(err: common::fs::ScanError) -> Self {
+        match err {
+            common::fs::ScanError::NotFound(p) => IncrError::SourceNotFound(p),
+            common::fs::ScanError::NotDirectory(p) => IncrError::SourceNotDirectory(p),
+            common::fs::ScanError::Io(e) => IncrError::Io(e),
+        }
+    }
+}
+
 /// Result type alias used throughout the crate.
 ///
 /// Like Java's generic `Result<T>` pattern — every function that can fail

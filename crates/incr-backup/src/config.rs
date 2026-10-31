@@ -19,7 +19,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{IncrError, Result};
@@ -105,131 +104,10 @@ struct TomlSnapshot {
     timezone: Option<SnapshotTimezone>,
 }
 
-/// Timezone setting for snapshot timestamp formatting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
-pub enum SnapshotTimezone {
-    /// Coordinated Universal Time with 'Z' suffix (e.g., `2026-10-29T04-28Z`).
-    #[default]
-    Utc,
-    /// Local machine timezone with numeric offset (e.g., `2026-10-29T09-58+0530`).
-    Local,
-}
-
-impl Serialize for SnapshotTimezone {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for SnapshotTimezone {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse::<SnapshotTimezone>().map_err(serde::de::Error::custom)
-    }
-}
-
-impl SnapshotTimezone {
-    /// Format a UTC DateTime according to this timezone setting.
-    pub fn format_datetime(&self, dt: DateTime<Utc>) -> String {
-        match self {
-            SnapshotTimezone::Utc => dt.format("%Y-%m-%dT%H-%MZ").to_string(),
-            SnapshotTimezone::Local => {
-                dt.with_timezone(&Local).format("%Y-%m-%dT%H-%M%z").to_string()
-            }
-        }
-    }
-
-    /// Format a UTC DateTime for human-readable display according to this timezone setting.
-    pub fn format_display_datetime(&self, dt: DateTime<Utc>) -> String {
-        match self {
-            SnapshotTimezone::Utc => dt.format("%Y-%m-%dT%H:%MZ").to_string(),
-            SnapshotTimezone::Local => {
-                dt.with_timezone(&Local).format("%Y-%m-%dT%H:%M%:z").to_string()
-            }
-        }
-    }
-
-    /// Format the current time according to this timezone setting.
-    pub fn now_formatted(&self) -> String {
-        self.format_datetime(Utc::now())
-    }
-
-    /// Format a log timestamp (seconds precision) according to this timezone setting.
-    pub fn format_log_timestamp(&self) -> String {
-        match self {
-            SnapshotTimezone::Utc => Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            SnapshotTimezone::Local => Local::now().format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
-        }
-    }
-
-    /// Format a UTC DateTime for log/console messages with full microsecond precision according to this timezone setting.
-    pub fn format_message_datetime(&self, dt: DateTime<Utc>) -> String {
-        match self {
-            SnapshotTimezone::Utc => dt.to_string(),
-            SnapshotTimezone::Local => dt.with_timezone(&Local).to_string(),
-        }
-    }
-
-    /// Format a UTC DateTime in RFC3339 format according to this timezone setting.
-    pub fn format_rfc3339(&self, dt: DateTime<Utc>) -> String {
-        match self {
-            SnapshotTimezone::Utc => dt.to_rfc3339(),
-            SnapshotTimezone::Local => dt.with_timezone(&Local).to_rfc3339(),
-        }
-    }
-}
-
-static CURRENT_TIMEZONE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-const TZ_UTC: u8 = 0;
-const TZ_LOCAL: u8 = 1;
-
-/// Get the currently configured timezone for timestamps across the application.
-pub fn get_configured_timezone() -> SnapshotTimezone {
-    match CURRENT_TIMEZONE.load(std::sync::atomic::Ordering::Relaxed) {
-        TZ_LOCAL => SnapshotTimezone::Local,
-        _ => SnapshotTimezone::Utc,
-    }
-}
-
-/// Set the configured timezone for timestamps across the application.
-pub fn set_configured_timezone(tz: SnapshotTimezone) {
-    let val = match tz {
-        SnapshotTimezone::Utc => TZ_UTC,
-        SnapshotTimezone::Local => TZ_LOCAL,
-    };
-    CURRENT_TIMEZONE.store(val, std::sync::atomic::Ordering::Relaxed);
-}
-
-impl std::str::FromStr for SnapshotTimezone {
-    type Err = IncrError;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "utc" | "z" | "gmt" => Ok(SnapshotTimezone::Utc),
-            "local" => Ok(SnapshotTimezone::Local),
-            _ => Err(IncrError::InvalidConfig(format!(
-                "invalid timezone '{}': expected 'utc' or 'local'",
-                s
-            ))),
-        }
-    }
-}
-
-impl std::fmt::Display for SnapshotTimezone {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SnapshotTimezone::Utc => write!(f, "utc"),
-            SnapshotTimezone::Local => write!(f, "local"),
-        }
-    }
-}
+pub use common::config::{
+    find_config_file, load_toml_file, read_env_var, read_env_var_parsed, ConfigError, LayeredConfig,
+};
+pub use common::time::{get_configured_timezone, set_configured_timezone, SnapshotTimezone, Timezone};
 
 /// Top-level TOML file structure matching `incr-backup.toml`.
 ///
@@ -462,6 +340,59 @@ impl Default for Config {
     }
 }
 
+impl LayeredConfig for Config {
+    type CliOverrides = CliOverrides;
+    type Error = IncrError;
+
+    fn apply_env_overrides(&mut self) {
+        if let Some(source) = read_env_var("INCR_BACKUP_SOURCE") {
+            self.source_path = source;
+        }
+        if let Some(remote) = read_env_var("INCR_BACKUP_REMOTE") {
+            self.remote_path = remote;
+        }
+        if let Some(rclone) = read_env_var("INCR_BACKUP_RCLONE_PATH") {
+            self.rclone.path = rclone;
+        }
+        if let Some(flags) = read_env_var("INCR_BACKUP_RCLONE_FLAGS") {
+            self.rclone.extra_flags = flags;
+        }
+        if let Some(tz) = read_env_var_parsed::<SnapshotTimezone>("INCR_BACKUP_TIMEZONE") {
+            self.timezone = tz;
+            set_configured_timezone(self.timezone);
+        }
+    }
+
+    fn apply_cli_overrides(&mut self, overrides: &Self::CliOverrides) {
+        if let Some(ref source) = overrides.source {
+            self.source_path = source.clone();
+        }
+        if let Some(ref remote) = overrides.remote {
+            self.remote_path = remote.clone();
+        }
+        if let Some(ref rclone_path) = overrides.rclone_path {
+            self.rclone.path = rclone_path.clone();
+        }
+        if let Some(ref rclone_flags) = overrides.rclone_flags {
+            self.rclone.extra_flags = rclone_flags.clone();
+        }
+        if let Some(verbose) = overrides.verbose {
+            self.verbose = verbose;
+        }
+        if let Some(dry_run) = overrides.dry_run {
+            self.dry_run = dry_run;
+        }
+        if let Some(tz) = overrides.timezone {
+            self.timezone = tz;
+            set_configured_timezone(self.timezone);
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.validate()
+    }
+}
+
 impl Config {
     /// Apply CLI and environment variable overrides to this configuration.
     ///
@@ -476,57 +407,8 @@ impl Config {
     /// Like Python's `{**defaults, **env_vars, **cli_args}` dict merge, or
     /// Java's builder pattern: `config.withSource(cliSource).withRemote(cliRemote)`.
     pub fn with_overrides(mut self, overrides: &CliOverrides) -> Self {
-        // For each field: CLI arg > env var > existing value.
-        // `std::env::var("NAME").ok()` returns Option<String> — like Python's os.environ.get().
-
-        // Source path
-        if let Some(ref source) = overrides.source {
-            self.source_path = source.clone();
-        } else if let Ok(env_source) = std::env::var("INCR_BACKUP_SOURCE") {
-            self.source_path = env_source;
-        }
-
-        // Remote path
-        if let Some(ref remote) = overrides.remote {
-            self.remote_path = remote.clone();
-        } else if let Ok(env_remote) = std::env::var("INCR_BACKUP_REMOTE") {
-            self.remote_path = env_remote;
-        }
-
-        // Rclone binary path
-        if let Some(ref rclone_path) = overrides.rclone_path {
-            self.rclone.path = rclone_path.clone();
-        } else if let Ok(env_rclone) = std::env::var("INCR_BACKUP_RCLONE_PATH") {
-            self.rclone.path = env_rclone;
-        }
-
-        // Rclone extra flags
-        if let Some(ref rclone_flags) = overrides.rclone_flags {
-            self.rclone.extra_flags = rclone_flags.clone();
-        } else if let Ok(env_flags) = std::env::var("INCR_BACKUP_RCLONE_FLAGS") {
-            self.rclone.extra_flags = env_flags;
-        }
-
-        // Verbosity
-        if let Some(verbose) = overrides.verbose {
-            self.verbose = verbose;
-        }
-
-        // Dry-run
-        if let Some(dry_run) = overrides.dry_run {
-            self.dry_run = dry_run;
-        }
-
-        // Timezone
-        if let Some(tz) = overrides.timezone {
-            self.timezone = tz;
-        } else if let Ok(env_tz) = std::env::var("INCR_BACKUP_TIMEZONE")
-            && let Ok(tz) = env_tz.parse::<SnapshotTimezone>()
-        {
-            self.timezone = tz;
-        }
-        set_configured_timezone(self.timezone);
-
+        self.apply_env_overrides();
+        self.apply_cli_overrides(overrides);
         self
     }
 
@@ -676,6 +558,7 @@ impl RemoteConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use std::io::Write;
 
     /// Helper: write a TOML string to a temporary file and return the path.
@@ -1030,7 +913,10 @@ path = "gdrive:original"
     #[test]
     fn test_example_config_file_parses() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let example_path = manifest_dir.join("config/incr-backup-example.toml");
+        let mut example_path = manifest_dir.join("config/incr-backup-example.toml");
+        if !example_path.exists() {
+            example_path = manifest_dir.join("../../config/incr-backup-example.toml");
+        }
         assert!(example_path.exists());
         let config = Config::load(&example_path).expect("example config should parse cleanly");
         assert_eq!(config.source_path, "/home/user/documents");

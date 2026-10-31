@@ -1,13 +1,18 @@
 //! Common test helpers for incr-backup integration tests.
 
+pub use test_commons::workspace::TempWorkspace;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command as StdCommand, Stdio};
 use assert_cmd::Command;
 use tempfile::TempDir;
 
+/// Backup-specific isolated test environment containing `source/` and `remote/` directories.
 #[allow(dead_code)]
 pub struct TestEnv {
+    /// Underlying generic temporary workspace.
+    pub workspace: TempWorkspace,
     /// Temporary root directory keeping both source and remote.
     pub temp_dir: TempDir,
     pub source_path: PathBuf,
@@ -18,14 +23,15 @@ pub struct TestEnv {
 impl TestEnv {
     /// Create a new isolated test environment.
     pub fn new() -> Self {
-        let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let source_path = temp_dir.path().join("source");
-        let remote_path = temp_dir.path().join("remote");
+        let workspace = TempWorkspace::new();
+        let source_path = workspace.create_dir("source");
+        let remote_path = workspace.create_dir("remote");
 
-        fs::create_dir_all(&source_path).expect("failed to create source dir");
-        fs::create_dir_all(&remote_path).expect("failed to create remote dir");
+        // Clone TempDir path handle for backward compatibility
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
 
         Self {
+            workspace,
             temp_dir,
             source_path,
             remote_path,

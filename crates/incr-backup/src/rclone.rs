@@ -12,36 +12,19 @@
 //! We do NOT reimplement any rclone functionality. This module is purely
 //! orchestration: "call rclone with these args and give me the result."
 
-use log::{debug, info};
 use serde::Deserialize;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 use crate::config::Config;
 use crate::error::{IncrError, Result};
+use common::subprocess::SubprocessRunner;
 
 /// Wrapper around the rclone binary for all remote operations.
 ///
 /// Constructed once from [`Config`] and shared (by reference) across all
-/// manager objects. Holds the binary path, extra flags, and runtime modes.
-///
-/// ## Analogy
-/// Like a Java HTTP client configured once with base URL and headers,
-/// then reused for every request.
+/// manager objects. Wraps a generic [`SubprocessRunner`] with rclone-specific
+/// subcommands.
 pub struct Rclone {
-    /// Path to the rclone binary (e.g., `"rclone"` or `"/usr/bin/rclone"`).
-    binary_path: String,
-
-    /// Extra flags appended to every rclone invocation.
-    /// Parsed from a single string into individual args.
-    extra_flags: Vec<String>,
-
-    /// When true, mutating commands log what they'd do but don't execute.
-    /// Read-only commands (lsjson, cat, size, lsd, lsf) always execute.
-    dry_run: bool,
-
-    /// Verbosity level — controls how much rclone output we show.
-    verbose: u8,
+    runner: SubprocessRunner,
 }
 
 /// Parsed output of `rclone size --json`.
@@ -55,9 +38,6 @@ pub struct SizeOutput {
 
 impl Rclone {
     /// Create a new Rclone wrapper from the application config.
-    ///
-    /// Parses `extra_flags` from a space-separated string into individual args.
-    /// No I/O happens here — the wrapper is inert until methods are called.
     pub fn new(config: &Config) -> Self {
         let extra_flags: Vec<String> = if config.rclone.extra_flags.is_empty() {
             Vec::new()
@@ -70,12 +50,27 @@ impl Rclone {
                 .collect()
         };
 
-        Self {
-            binary_path: config.rclone.path.clone(),
-            extra_flags,
-            dry_run: config.dry_run,
-            verbose: config.verbose,
-        }
+        let runner = SubprocessRunner::new(&config.rclone.path)
+            .with_extra_flags(extra_flags)
+            .with_dry_run(config.dry_run)
+            .with_verbose(config.verbose);
+
+        Self { runner }
+    }
+
+    /// Path to the rclone binary.
+    pub fn binary_path(&self) -> &str {
+        self.runner.binary_path()
+    }
+
+    /// Extra flags configured on this rclone instance.
+    pub fn extra_flags(&self) -> &[String] {
+        self.runner.extra_flags()
+    }
+
+    /// Whether dry-run mode is enabled.
+    pub fn is_dry_run(&self) -> bool {
+        self.runner.is_dry_run()
     }
 
     // ─── Core Operations ────────────────────────────────────────────────
@@ -238,60 +233,10 @@ impl Rclone {
     ///
     /// Pipes `data` to rclone's stdin, which writes it to the remote path.
     /// Used to upload lock files, journal files, manifests, and config.
-    ///
-    /// ## How it works
-    /// `rclone rcat` reads from stdin and writes to the specified remote path.
-    /// We spawn the process with stdin piped, write the data, then wait.
-    /// Like Python's `subprocess.Popen(..., stdin=PIPE)` + `proc.communicate(input)`.
     pub fn rcat(&self, remote_path: &str, data: &str) -> Result<String> {
-        if self.dry_run {
-            info!(
-                "[DRY-RUN] Would write {} bytes to {}",
-                data.len(),
-                remote_path
-            );
-            return Ok(String::new());
-        }
-
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.arg("rcat").arg(remote_path);
-
-        // Add extra flags
-        for flag in &self.extra_flags {
-            cmd.arg(flag);
-        }
-
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        debug!("rclone rcat {} (piping {} bytes)", remote_path, data.len());
-
-        let mut child = cmd.spawn().map_err(|e| IncrError::RcloneNotFound {
-            path: self.binary_path.clone(),
-            source: e,
-        })?;
-
-        // Write data to stdin, then close it (drop)
-        // Like Python: proc.stdin.write(data); proc.stdin.close()
-        if let Some(ref mut stdin) = child.stdin {
-            stdin.write_all(data.as_bytes())?;
-        }
-        // Drop stdin to signal EOF
-        drop(child.stdin.take());
-
-        let output = child.wait_with_output()?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            Err(IncrError::RcloneFailed {
-                cmd: format!("rclone rcat {}", remote_path),
-                code: output.status.code().unwrap_or(-1),
-                stderr,
-            })
-        }
+        self.runner
+            .run_piped_stdin(&["rcat", remote_path], data)
+            .map_err(IncrError::from)
     }
 
     /// Run `rclone size <remote_path> --json`.
@@ -432,62 +377,9 @@ impl Rclone {
     /// * [`IncrError::RcloneNotFound`] if the binary doesn't exist
     /// * [`IncrError::RcloneFailed`] if the exit code is non-zero
     fn run_rclone(&self, args: &[String], is_mutating: bool) -> Result<String> {
-        // Dry-run: skip mutating commands, log what we'd do.
-        if self.dry_run && is_mutating {
-            let cmd_str = format!("{} {}", self.binary_path, args.join(" "));
-            info!("[DRY-RUN] Would execute: {}", cmd_str);
-            return Ok(String::new());
-        }
-
-        let mut cmd = Command::new(&self.binary_path);
-
-        // Add the command-specific args
-        for arg in args {
-            cmd.arg(arg);
-        }
-
-        // Add extra flags from config
-        for flag in &self.extra_flags {
-            cmd.arg(flag);
-        }
-
-        if self.verbose == 1 {
-            cmd.arg("-v");
-        } else if self.verbose >= 2 {
-            cmd.arg("-vv");
-        }
-
-        // Capture stdout and stderr
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        // Log the full command at debug level
-        let cmd_str = format!(
-            "{} {} {}",
-            self.binary_path,
-            args.join(" "),
-            self.extra_flags.join(" ")
-        );
-        debug!("Executing: {}", cmd_str.trim());
-
-        // Spawn and wait — like Java's `process.waitFor()` or Python's `subprocess.run()`
-        let output = cmd.output().map_err(|e| IncrError::RcloneNotFound {
-            path: self.binary_path.clone(),
-            source: e,
-        })?;
-
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            Ok(stdout)
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let code = output.status.code().unwrap_or(-1);
-
-            Err(IncrError::RcloneFailed {
-                cmd: cmd_str.trim().to_string(),
-                code,
-                stderr,
-            })
-        }
+        self.runner
+            .run(args, is_mutating)
+            .map_err(IncrError::from)
     }
 }
 
@@ -525,9 +417,9 @@ mod tests {
     fn test_rclone_new() {
         let config = test_config();
         let rclone = Rclone::new(&config);
-        assert_eq!(rclone.binary_path, "rclone");
-        assert!(rclone.extra_flags.is_empty());
-        assert!(rclone.dry_run);
+        assert_eq!(rclone.binary_path(), "rclone");
+        assert!(rclone.extra_flags().is_empty());
+        assert!(rclone.is_dry_run());
     }
 
     #[test]
@@ -536,7 +428,7 @@ mod tests {
         config.rclone.extra_flags = "--drive-acknowledge-abuse --transfers 8".to_string();
         let rclone = Rclone::new(&config);
         assert_eq!(
-            rclone.extra_flags,
+            rclone.extra_flags(),
             vec!["--drive-acknowledge-abuse", "--transfers", "8"]
         );
     }
