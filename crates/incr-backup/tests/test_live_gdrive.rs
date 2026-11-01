@@ -614,17 +614,19 @@ fn test_live_snapshot_compaction() {
 
     env.command().arg("init").assert().success();
 
-    // Create 3 timestamped snapshots in rapid succession with custom names
+    // Create timestamped snapshots in rapid succession with custom names
     // Note: compact requires ISO-8601 timestamps matching the configured timezone
-    let offset_str = format!("{}", chrono::Local::now().offset());
-    let from_time = format!("2026-10-30T00:00:00{}", offset_str);
-    let to_time = format!("2026-10-30T23:59:59{}", offset_str);
+    let now = chrono::Local::now();
+    let from_time = (now - chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let to_time = (now + chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
 
     env.write_source_file("log.txt", b"entry 1\n");
-    env.command().args(["sync", "--name", "2026-10-30T10-00Z"]).assert().success();
+    env.command().args(["sync", "--name", "snap-compact-1"]).assert().success();
 
     env.write_source_file("log.txt", b"entry 1\nentry 2\n");
-    env.command().args(["sync", "--name", "2026-10-30T11-00Z"]).assert().success();
+    env.command().args(["sync", "--name", "snap-compact-2"]).assert().success();
 
     // 1. Dry run compaction
     env.command()
