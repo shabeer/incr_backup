@@ -565,7 +565,8 @@ fn run_remove_snapshots_inner(
     }
 
     // Update remote snapshot catalog
-    let _ = crate::catalog::remove_from_catalog(rclone, remote_base, &names_to_remove);
+    let purged_diff_set: HashSet<String> = diff_dirs_to_purge.iter().cloned().collect();
+    let _ = crate::catalog::remove_from_catalog(rclone, remote_base, &names_to_remove, &purged_diff_set);
 
     info!(
         "Successfully deleted {} snapshot(s) up to {}. Remaining snapshots: {}",

@@ -224,11 +224,13 @@ pub fn append_or_update_catalog_entry(
     save_snapshot_catalog(rclone, remote_base, &entries)
 }
 
-/// Remove snapshots matching the given names or manifest stems from the remote catalog.
+/// Remove snapshots matching the given names or manifest stems from the remote catalog,
+/// and clear diff_dir for any surviving snapshots whose diff directories were purged.
 pub fn remove_from_catalog(
     rclone: &Rclone,
     remote_base: &str,
     names_to_remove: &HashSet<String>,
+    purged_diff_dirs: &HashSet<String>,
 ) -> Result<()> {
     let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
     let mut entries = match rclone.cat(&catalog_path) {
@@ -239,12 +241,17 @@ pub fn remove_from_catalog(
                 if trimmed.is_empty() {
                     continue;
                 }
-                if let Ok(item) = serde_json::from_str::<SnapshotSummary>(trimmed) {
+                if let Ok(mut item) = serde_json::from_str::<SnapshotSummary>(trimmed) {
                     let stem = item.manifest_name.trim_end_matches(".json");
                     if !names_to_remove.contains(&item.name)
                         && !names_to_remove.contains(&item.manifest_name)
                         && !names_to_remove.contains(stem)
                     {
+                        if let Some(ref d) = item.diff_dir {
+                            if purged_diff_dirs.contains(d) {
+                                item.diff_dir = None;
+                            }
+                        }
                         list.push(item);
                     }
                 }
@@ -259,6 +266,13 @@ pub fn remove_from_catalog(
                     && !names_to_remove.contains(&item.manifest_name)
                     && !names_to_remove.contains(stem)
             });
+            for item in &mut list {
+                if let Some(ref d) = item.diff_dir {
+                    if purged_diff_dirs.contains(d) {
+                        item.diff_dir = None;
+                    }
+                }
+            }
             list
         }
     };

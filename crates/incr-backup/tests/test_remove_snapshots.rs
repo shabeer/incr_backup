@@ -88,6 +88,22 @@ fn test_remove_snapshots_basic_and_restore_after_timestamp() {
     // Verify snap3 manifest is preserved
     assert!(manifests_dir.join("snap3.json").exists(), "snap3.json must be preserved");
 
+    // Verify .meta/snapshots.jsonl is updated
+    let catalog_path = env.remote_path.join(".meta/snapshots.jsonl");
+    assert!(catalog_path.exists(), "snapshots.jsonl must exist");
+    let catalog_content = std::fs::read_to_string(&catalog_path).unwrap();
+    assert!(!catalog_content.contains("snap1"), "snap1 must be removed from catalog");
+    assert!(!catalog_content.contains("snap2"), "snap2 must be removed from catalog");
+    assert!(catalog_content.contains("snap3"), "snap3 must remain in catalog");
+
+    // Verify list command reflects the updated catalog
+    env.command()
+        .args(["list", "--remote", &env.remote_str()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("snap3"))
+        .stdout(predicate::str::contains("Total: 1 snapshots"));
+
     // 6. Test restoring snap3 (which is timestamped after snap2)
     let restore_snap3_dir = env.temp_dir.path().join("restore_snap3");
     env.command()
