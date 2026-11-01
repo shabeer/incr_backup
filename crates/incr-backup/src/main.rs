@@ -114,7 +114,7 @@ enum Commands {
 
     /// Restore a snapshot to a local directory.
     Restore {
-        /// Snapshot to restore (e.g., hourly.2, daily.0, current).
+        /// Snapshot to restore (e.g., 2026-10-28T08-00Z, daily-2026-10-27, current).
         snapshot: String,
 
         /// Local destination directory.

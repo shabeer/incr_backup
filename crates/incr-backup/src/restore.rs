@@ -112,7 +112,55 @@ pub fn run_restore(config: &Config, rclone: &Rclone, options: &RestoreOptions) -
     }
 
     // Step 3: Load target manifest
-    let target_manifest = load_target_manifest(rclone, remote_base, &options.snapshot)?;
+    let mut target_manifest = load_target_manifest(rclone, remote_base, &options.snapshot)?;
+
+    // Discover if the target snapshot has a diff directory containing changed (updated or deleted) files
+    let target_diff_dir = find_snapshot_diff_dir(rclone, remote_base, &options.snapshot);
+    let mut target_diff_files: Option<SnapshotDiffFiles> = None;
+
+    if let Some(ref dir_name) = target_diff_dir {
+        // Check if there are any snapshots strictly preceding the target snapshot
+        let all_snapshots = crate::compact::discover_all_snapshots(rclone, remote_base).unwrap_or_default();
+        let has_preceding_snapshot = all_snapshots.iter().any(|s| {
+            s.name != options.snapshot
+                && s.manifest_name != format!("{}.json", options.snapshot)
+                && s.created_at < target_manifest.created_at
+        });
+
+        let diff_path = format!("{remote_base}/diffs/{dir_name}");
+        if let Ok(lsjson) = rclone.lsjson_recursive_hash(&diff_path) {
+            let now = chrono::Utc::now();
+            if let Ok(diff_manifest) = Manifest::from_rclone_lsjson(&lsjson, dir_name, &now) {
+                let mut diff_file_set = std::collections::HashSet::new();
+                for file in diff_manifest.files {
+                    if !has_preceding_snapshot {
+                        // When there are no preceding snapshots (e.g. after adopting existing files),
+                        // the diff directory contains the pre-sync versions of all changed (updated or deleted) files.
+                        diff_file_set.insert(file.path.clone());
+                        if let Some(existing) = target_manifest.files.iter_mut().find(|f| f.path == file.path) {
+                            *existing = file;
+                        } else {
+                            target_manifest.files.push(file);
+                        }
+                    } else if !target_manifest.has_file(&file.path) {
+                        // When preceding snapshots exist, only files deleted during this sync that are absent from
+                        // target_manifest are added if restoring by this diff directory
+                        diff_file_set.insert(file.path.clone());
+                        target_manifest.files.push(file);
+                    }
+                }
+                target_manifest.file_count = target_manifest.files.len();
+                target_manifest.total_size = target_manifest.files.iter().map(|f| f.size).sum();
+
+                if !diff_file_set.is_empty() {
+                    target_diff_files = Some(SnapshotDiffFiles {
+                        dir_name: dir_name.clone(),
+                        files: diff_file_set,
+                    });
+                }
+            }
+        }
+    }
 
     // Step 4: Get snapshots between target and current
     let snapshots_after = get_snapshots_after(
@@ -123,7 +171,7 @@ pub fn run_restore(config: &Config, rclone: &Rclone, options: &RestoreOptions) -
     )?;
 
     // Step 5: Resolve file locations
-    let mut resolved = resolve_locations(&target_manifest, &snapshots_after);
+    let mut resolved = resolve_locations(&target_manifest, &snapshots_after, target_diff_files.as_ref());
 
     // Step 6: Apply subpath filter if specified
     if let Some(ref subpath) = options.subpath {
@@ -231,6 +279,22 @@ pub struct SnapshotDiffFiles {
     pub files: std::collections::HashSet<String>,
 }
 
+/// Find a matching diff directory name for a snapshot (e.g., "2026-10-28T08-00Z" or "daily-2026-10-27").
+pub fn find_snapshot_diff_dir(rclone: &Rclone, remote_base: &str, snapshot_name: &str) -> Option<String> {
+    let clean_name = snapshot_name.trim_end_matches('/');
+    let diffs_dir = format!("{remote_base}/diffs/");
+    let existing_diff_dirs: std::collections::HashSet<String> = rclone.lsd(&diffs_dir).ok()?.into_iter().collect();
+    if existing_diff_dirs.contains(clean_name) {
+        return Some(clean_name.to_string());
+    }
+    let stem = clean_name.trim_end_matches(".json");
+    if existing_diff_dirs.contains(stem) {
+        return Some(stem.to_string());
+    }
+    let prefix = format!("{stem}__");
+    existing_diff_dirs.into_iter().find(|d| d.starts_with(&prefix))
+}
+
 /// Resolve where each file lives on the remote for a given snapshot.
 ///
 /// For each file in the target manifest, search through diff directories
@@ -245,6 +309,7 @@ pub struct SnapshotDiffFiles {
 pub fn resolve_locations(
     target_manifest: &Manifest,
     snapshots_after_target: &[SnapshotDiffFiles],
+    target_diff: Option<&SnapshotDiffFiles>,
 ) -> Vec<ResolveEntry> {
     target_manifest.files.iter().map(|file| {
         // Check each diff directory after the target (closest first)
@@ -253,6 +318,15 @@ pub fn resolve_locations(
                 return ResolveEntry {
                     file: file.clone(),
                     remote_path: format!("diffs/{}/{}", snap.dir_name, file.path),
+                };
+            }
+        }
+        // If file was deleted in target and preserved in target's diff directory
+        if let Some(target_snap) = target_diff {
+            if target_snap.files.contains(&file.path) {
+                return ResolveEntry {
+                    file: file.clone(),
+                    remote_path: format!("diffs/{}/{}", target_snap.dir_name, file.path),
                 };
             }
         }
@@ -311,6 +385,19 @@ fn load_target_manifest(
                     if m.snapshot_name == snapshot_name {
                         return Ok(m);
                     }
+                }
+            }
+        }
+    }
+
+    // 4. Try diffs directory if diff directory exists
+    if let Some(diff_dir) = find_snapshot_diff_dir(rclone, remote_base, snapshot_name) {
+        let diff_path = format!("{remote_base}/diffs/{diff_dir}");
+        if let Ok(lsjson) = rclone.lsjson_recursive_hash(&diff_path) {
+            let now = chrono::Utc::now();
+            if let Ok(manifest) = Manifest::from_rclone_lsjson(&lsjson, snapshot_name, &now) {
+                if manifest.file_count > 0 {
+                    return Ok(manifest);
                 }
             }
         }
@@ -457,11 +544,61 @@ mod tests {
             &Utc::now(),
         );
 
-        let resolved = resolve_locations(&manifest, &[]);
+        let resolved = resolve_locations(&manifest, &[], None);
 
         assert_eq!(resolved.len(), 2);
         assert_eq!(resolved[0].remote_path, "current/a.txt");
         assert_eq!(resolved[1].remote_path, "current/b.txt");
+    }
+
+    #[test]
+    fn test_resolve_locations_with_target_diff_deleted_file() {
+        let manifest = Manifest::new(
+            "2026-10-28T08-00Z",
+            vec![
+                sample_entry("a.txt", "aaa"),
+                sample_entry("deleted.txt", "ddd"),
+            ],
+            &Utc::now(),
+        );
+
+        let mut diff_files = std::collections::HashSet::new();
+        diff_files.insert("deleted.txt".to_string());
+        let target_diff = SnapshotDiffFiles {
+            dir_name: "2026-10-28T08-00Z".to_string(),
+            files: diff_files,
+        };
+
+        let resolved = resolve_locations(&manifest, &[], Some(&target_diff));
+
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].remote_path, "current/a.txt");
+        assert_eq!(resolved[1].remote_path, "diffs/2026-10-28T08-00Z/deleted.txt");
+    }
+
+    #[test]
+    fn test_resolve_locations_with_target_diff_updated_file() {
+        let manifest = Manifest::new(
+            "2026-10-28T08-00Z",
+            vec![
+                sample_entry("a.txt", "aaa"),
+                sample_entry("updated.txt", "v1"),
+            ],
+            &Utc::now(),
+        );
+
+        let mut diff_files = std::collections::HashSet::new();
+        diff_files.insert("updated.txt".to_string());
+        let target_diff = SnapshotDiffFiles {
+            dir_name: "2026-10-28T08-00Z".to_string(),
+            files: diff_files,
+        };
+
+        let resolved = resolve_locations(&manifest, &[], Some(&target_diff));
+
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].remote_path, "current/a.txt");
+        assert_eq!(resolved[1].remote_path, "diffs/2026-10-28T08-00Z/updated.txt");
     }
 
     #[test]
