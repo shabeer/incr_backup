@@ -243,14 +243,19 @@ pub fn discover_all_snapshots(rclone: &Rclone, remote_base: &str) -> Result<Vec<
             let stem = file.trim_end_matches(".json").to_string();
 
             // Match diff directory
+            let prefix_stem = format!("{stem}__");
+            let prefix_name = format!("{}__", manifest.snapshot_name);
             let diff_dir = if existing_diff_dirs.contains(&stem) {
                 Some(stem.clone())
             } else if existing_diff_dirs.contains(&manifest.snapshot_name) {
                 Some(manifest.snapshot_name.clone())
+            } else if let Some(d) = existing_diff_dirs.iter().find(|d| d.starts_with(&prefix_stem)) {
+                Some(d.clone())
             } else {
-                // Check for tier prefix (e.g. "hourly.0" matching "hourly.0__2026...")
-                let prefix = format!("{stem}__");
-                existing_diff_dirs.iter().find(|d| d.starts_with(&prefix)).cloned()
+                existing_diff_dirs
+                    .iter()
+                    .find(|d| !manifest.snapshot_name.is_empty() && d.starts_with(&prefix_name))
+                    .cloned()
             };
 
             Some(SnapshotMeta {

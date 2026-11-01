@@ -143,13 +143,19 @@ pub fn rebuild_snapshot_catalog(
                 header.snapshot_name.clone()
             };
 
+            let prefix_stem = format!("{stem}__");
+            let prefix_name = format!("{name}__");
             let diff_dir = if existing_diff_dirs.contains(&stem) {
                 Some(stem)
             } else if existing_diff_dirs.contains(&name) {
                 Some(name.clone())
+            } else if let Some(d) = existing_diff_dirs.iter().find(|d| d.starts_with(&prefix_stem)) {
+                Some(d.clone())
             } else {
-                let prefix = format!("{stem}__");
-                existing_diff_dirs.iter().find(|d| d.starts_with(&prefix)).cloned()
+                existing_diff_dirs
+                    .iter()
+                    .find(|d| !name.is_empty() && d.starts_with(&prefix_name))
+                    .cloned()
             };
 
             Some(SnapshotSummary {

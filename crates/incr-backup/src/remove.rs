@@ -22,7 +22,7 @@
 //! - **Space Reclamation**: A large temporary directory (e.g. `build/`, `video/`)
 //!   was backed up accidentally and needs to be reclaimed across all snapshots.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
@@ -469,10 +469,10 @@ fn run_remove_snapshots_inner(
     rclone: &Rclone,
     options: &RemoveSnapshotsOptions,
 ) -> Result<RemoveSnapshotsResult> {
-    let remote_base = &config.remote_path;
+    let remote_clean = config.remote_path.trim_end_matches('/');
 
     // Step 2: Discover all snapshots sorted chronologically
-    let mut all_snapshots = crate::compact::discover_all_snapshots(rclone, remote_base)?;
+    let mut all_snapshots = crate::compact::discover_all_snapshots(rclone, remote_clean)?;
     all_snapshots.sort_by_key(|s| s.created_at);
 
     let snapshots_scanned = all_snapshots.len();
@@ -499,11 +499,92 @@ fn run_remove_snapshots_inner(
     // Step 5: Determine diff directories to purge
     let mut diff_dirs_to_purge = Vec::new();
 
+    let diffs_base = format!("{remote_clean}/diffs");
+    let existing_diff_dirs: HashSet<String> = rclone.lsd(&diffs_base).unwrap_or_default().into_iter().collect();
+
+    // Also load catalog if available to find diff_dir for each snapshot
+    let catalog_entries = crate::catalog::load_snapshot_catalog(rclone, remote_clean).unwrap_or_default();
+    let catalog_map: HashMap<String, Option<String>> = catalog_entries
+        .into_iter()
+        .map(|e| (e.name, e.diff_dir))
+        .collect();
+
+    let resolve_diff_dirs_for_snap = |snap: &crate::compact::SnapshotMeta| -> Vec<String> {
+        let mut found = Vec::new();
+        let stem = snap.manifest_name.trim_end_matches(".json");
+
+        // 1. Direct snap.diff_dir if populated
+        if let Some(ref d) = snap.diff_dir {
+            let clean = d.trim_matches('/');
+            if (existing_diff_dirs.is_empty() || existing_diff_dirs.contains(clean))
+                && !found.contains(&clean.to_string())
+            {
+                found.push(clean.to_string());
+            }
+        }
+
+        // 2. Catalog entry
+        if let Some(Some(d)) = catalog_map.get(&snap.name) {
+            let clean = d.trim_matches('/');
+            if (existing_diff_dirs.is_empty() || existing_diff_dirs.contains(clean))
+                && !found.contains(&clean.to_string())
+            {
+                found.push(clean.to_string());
+            }
+        }
+
+        // 3. Exact matches in existing_diff_dirs
+        if existing_diff_dirs.contains(stem) && !found.contains(&stem.to_string()) {
+            found.push(stem.to_string());
+        }
+        if !snap.name.is_empty() && existing_diff_dirs.contains(&snap.name) && !found.contains(&snap.name) {
+            found.push(snap.name.clone());
+        }
+
+        // 4. Prefix matches in existing_diff_dirs (e.g. hourly.0__2026...)
+        let prefix_stem = format!("{stem}__");
+        let prefix_name = format!("{}__", snap.name);
+        for d in &existing_diff_dirs {
+            if (d.starts_with(&prefix_stem) || (!snap.name.is_empty() && d.starts_with(&prefix_name)))
+                && !found.contains(d)
+            {
+                found.push(d.clone());
+            }
+        }
+
+        // 5. Restore helper find_snapshot_diff_dir
+        if found.is_empty() {
+            if let Some(d) = crate::restore::find_snapshot_diff_dir(rclone, remote_clean, &snap.name) {
+                if !found.contains(&d) {
+                    found.push(d);
+                }
+            }
+            if let Some(d) = crate::restore::find_snapshot_diff_dir(rclone, remote_clean, stem) {
+                if !found.contains(&d) {
+                    found.push(d);
+                }
+            }
+        }
+
+        // 6. Fallback if existing_diff_dirs was empty (e.g. lsd failed on remote)
+        if found.is_empty() && existing_diff_dirs.is_empty() {
+            if let Some(ref d) = snap.diff_dir {
+                found.push(d.trim_matches('/').to_string());
+            } else if !snap.name.is_empty() {
+                found.push(snap.name.clone());
+            } else if !stem.is_empty() {
+                found.push(stem.to_string());
+            }
+        }
+
+        found
+    };
+
     // 5a. Diffs belonging to the snapshots being deleted
     for snap in &to_remove {
-        if let Some(ref dir) = snap.diff_dir {
-            if !diff_dirs_to_purge.contains(dir) {
-                diff_dirs_to_purge.push(dir.clone());
+        for dir in resolve_diff_dirs_for_snap(snap) {
+            if !diff_dirs_to_purge.contains(&dir) {
+                diff_dirs_to_purge.push(dir);
             }
         }
     }
@@ -512,9 +593,9 @@ fn run_remove_snapshots_inner(
     // its diff directory contains diffs against the deleted history.
     // Purge it so the surviving snapshot becomes a clean baseline with zero orphaned files.
     if !to_remove.is_empty() && let Some(first_survivor) = to_keep.first() {
-        if let Some(ref dir) = first_survivor.diff_dir {
-            if !diff_dirs_to_purge.contains(dir) {
-                diff_dirs_to_purge.push(dir.clone());
+        for dir in resolve_diff_dirs_for_snap(first_survivor) {
+            if !diff_dirs_to_purge.contains(&dir) {
+                diff_dirs_to_purge.push(dir);
             }
         }
     }
@@ -547,14 +628,18 @@ fn run_remove_snapshots_inner(
 
     // Step 7: Delete physical diff directories on remote
     for dir in &diff_dirs_to_purge {
-        let diff_path = format!("{remote_base}/diffs/{dir}");
-        debug!("Purging diff directory {}", diff_path);
-        let _ = rclone.purge(&diff_path);
+        let clean_dir = dir.trim_matches('/');
+        let diff_path = format!("{remote_clean}/diffs/{clean_dir}");
+        info!("Purging diff directory {}", diff_path);
+        if let Err(e) = rclone.purge(&diff_path) {
+            warn!("Failed to purge diff directory {}: {}", diff_path, e);
+        }
+        let _ = rclone.rmdirs(&diff_path, false);
     }
-    let _ = rclone.rmdirs(&format!("{remote_base}/diffs/"), true);
+    let _ = rclone.rmdirs(&format!("{remote_clean}/diffs/"), true);
 
     // Step 8: Delete manifests of removed snapshots
-    let manifests_dir = format!("{remote_base}/.meta/manifests/");
+    let manifests_dir = format!("{remote_clean}/.meta/manifests/");
     let mut names_to_remove = HashSet::new();
     for snap in &to_remove {
         let manifest_file_path = format!("{manifests_dir}{}", snap.manifest_name);
@@ -562,11 +647,12 @@ fn run_remove_snapshots_inner(
         rclone.delete_file(&manifest_file_path)?;
         names_to_remove.insert(snap.name.clone());
         names_to_remove.insert(snap.manifest_name.clone());
+        names_to_remove.insert(snap.manifest_name.trim_end_matches(".json").to_string());
     }
 
     // Update remote snapshot catalog
     let purged_diff_set: HashSet<String> = diff_dirs_to_purge.iter().cloned().collect();
-    let _ = crate::catalog::remove_from_catalog(rclone, remote_base, &names_to_remove, &purged_diff_set);
+    let _ = crate::catalog::remove_from_catalog(rclone, remote_clean, &names_to_remove, &purged_diff_set);
 
     info!(
         "Successfully deleted {} snapshot(s) up to {}. Remaining snapshots: {}",

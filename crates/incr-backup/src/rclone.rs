@@ -269,23 +269,62 @@ impl Rclone {
     ///
     /// Always executes (read-only).
     pub fn lsd(&self, remote_path: &str) -> Result<Vec<String>> {
-        // Use lsjson instead of lsd for easier parsing
+        let clean_path = remote_path.trim_end_matches('/');
+
+        // Try lsjson first
         let output = self.run_rclone(
             &[
                 "lsjson".to_string(),
-                remote_path.to_string(),
+                clean_path.to_string(),
                 "--dirs-only".to_string(),
             ],
             false,
-        )?;
+        );
 
-        // Parse JSON array of directory entries
-        let entries: Vec<LsjsonEntry> = serde_json::from_str(&output).unwrap_or_default();
-        Ok(entries
-            .into_iter()
-            .filter(|e| e.is_dir)
-            .map(|e| e.path.trim_end_matches('/').to_string())
-            .collect())
+        let mut dirs = Vec::new();
+        let mut lsjson_succeeded = false;
+
+        if let Ok(json_str) = output {
+            if let Ok(entries) = serde_json::from_str::<Vec<LsjsonEntry>>(&json_str) {
+                lsjson_succeeded = true;
+                for e in entries {
+                    if e.is_dir {
+                        let p = if !e.name.is_empty() {
+                            e.name
+                        } else if !e.path.is_empty() {
+                            e.path.rsplit('/').next().unwrap_or(&e.path).to_string()
+                        } else {
+                            continue;
+                        };
+                        let trimmed = p.trim_matches('/').to_string();
+                        if !trimmed.is_empty() && !dirs.contains(&trimmed) {
+                            dirs.push(trimmed);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If lsjson failed or produced an empty list, fallback to `rclone lsf --dirs-only`
+        if !lsjson_succeeded || dirs.is_empty() {
+            if let Ok(lsf_output) = self.run_rclone(
+                &[
+                    "lsf".to_string(),
+                    clean_path.to_string(),
+                    "--dirs-only".to_string(),
+                ],
+                false,
+            ) {
+                for line in lsf_output.lines() {
+                    let trimmed = line.trim().trim_matches('/').to_string();
+                    if !trimmed.is_empty() && !dirs.contains(&trimmed) {
+                        dirs.push(trimmed);
+                    }
+                }
+            }
+        }
+
+        Ok(dirs)
     }
 
     /// Run `rclone lsf <remote_path>` — list files only.
@@ -387,9 +426,16 @@ impl Rclone {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct LsjsonEntry {
+    #[serde(default)]
     path: String,
     #[serde(default)]
+    name: String,
+    #[serde(default = "default_is_dir")]
     is_dir: bool,
+}
+
+fn default_is_dir() -> bool {
+    true
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

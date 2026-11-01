@@ -85,6 +85,11 @@ fn test_remove_snapshots_basic_and_restore_after_timestamp() {
     assert!(!manifests_dir.join("snap1.json").exists(), "snap1.json must be deleted");
     assert!(!manifests_dir.join("snap2.json").exists(), "snap2.json must be deleted");
 
+    // Verify diff directories for snap2 and promoted baseline snap3 are physically purged
+    let diffs_dir = env.remote_path.join("diffs");
+    assert!(!diffs_dir.join("snap2").exists(), "diffs/snap2 must be physically deleted");
+    assert!(!diffs_dir.join("snap3").exists(), "diffs/snap3 must be physically deleted as promoted baseline");
+
     // Verify snap3 manifest is preserved
     assert!(manifests_dir.join("snap3.json").exists(), "snap3.json must be preserved");
 
@@ -482,4 +487,124 @@ fn test_remove_snapshots_kebab_alias() {
 
     let manifests_dir = env.remote_path.join(".meta/manifests");
     assert!(!manifests_dir.join("snap1.json").exists());
+}
+
+#[test]
+fn test_remove_snapshots_purges_physical_diff_directories() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str()])
+        .assert()
+        .success();
+
+    // S1: baseline
+    env.write_source_file("fileA.txt", b"A v1");
+    env.write_source_file("fileB.txt", b"B v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s1"])
+        .assert()
+        .success();
+
+    // S2: modify A, delete B, add C -> generates diffs in diffs/s2
+    env.write_source_file("fileA.txt", b"A v2");
+    std::fs::remove_file(env.source_path.join("fileB.txt")).unwrap();
+    env.write_source_file("fileC.txt", b"C v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s2"])
+        .assert()
+        .success();
+
+    // S3: modify A, add D -> generates diffs in diffs/s3
+    env.write_source_file("fileA.txt", b"A v3");
+    env.write_source_file("fileD.txt", b"D v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s3"])
+        .assert()
+        .success();
+
+    // S4: modify C -> generates diffs in diffs/s4
+    env.write_source_file("fileC.txt", b"C v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s4"])
+        .assert()
+        .success();
+
+    // Verify physical diff directories exist before removal
+    let diffs_dir = env.remote_path.join("diffs");
+    assert!(diffs_dir.join("s2").exists(), "diffs/s2 must exist before removal");
+    assert!(diffs_dir.join("s3").exists(), "diffs/s3 must exist before removal");
+    assert!(diffs_dir.join("s4").exists(), "diffs/s4 must exist before removal");
+
+    // Run remove_snapshots --to s2
+    env.command()
+        .args([
+            "remove_snapshots",
+            "--to",
+            "s2",
+            "--remote",
+            &env.remote_str(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Purged diff directories:"))
+        .stdout(predicate::str::contains("diffs/s2/"))
+        .stdout(predicate::str::contains("diffs/s3/"))
+        .stdout(predicate::str::contains("Successfully deleted 2 snapshot(s)"));
+
+    // Verify physical diff directories:
+    // s2 (deleted snapshot) and s3 (promoted baseline) must be purged
+    assert!(!diffs_dir.join("s2").exists(), "diffs/s2 must be deleted from disk");
+    assert!(!diffs_dir.join("s3").exists(), "diffs/s3 must be deleted from disk");
+
+    // s4 (surviving non-baseline snapshot) must still retain its diffs
+    assert!(diffs_dir.join("s4").exists(), "diffs/s4 must remain intact");
+
+    // Verify manifests
+    let manifests_dir = env.remote_path.join(".meta/manifests");
+    assert!(!manifests_dir.join("s1.json").exists(), "s1.json manifest must be deleted");
+    assert!(!manifests_dir.join("s2.json").exists(), "s2.json manifest must be deleted");
+    assert!(manifests_dir.join("s3.json").exists(), "s3.json manifest must be kept");
+    assert!(manifests_dir.join("s4.json").exists(), "s4.json manifest must be kept");
+
+    // Verify surviving snapshots s3 and s4 restore accurately
+    let restore_s3_dir = env.temp_dir.path().join("restore_s3");
+    env.command()
+        .args([
+            "restore",
+            "s3",
+            "--to",
+            &restore_s3_dir.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Verification: PASSED ✓"));
+
+    assert_eq!(std::fs::read_to_string(restore_s3_dir.join("fileA.txt")).unwrap(), "A v3");
+    assert_eq!(std::fs::read_to_string(restore_s3_dir.join("fileC.txt")).unwrap(), "C v1");
+    assert_eq!(std::fs::read_to_string(restore_s3_dir.join("fileD.txt")).unwrap(), "D v1");
+    assert!(!restore_s3_dir.join("fileB.txt").exists());
+
+    let restore_s4_dir = env.temp_dir.path().join("restore_s4");
+    env.command()
+        .args([
+            "restore",
+            "s4",
+            "--to",
+            &restore_s4_dir.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Verification: PASSED ✓"));
+
+    assert_eq!(std::fs::read_to_string(restore_s4_dir.join("fileA.txt")).unwrap(), "A v3");
+    assert_eq!(std::fs::read_to_string(restore_s4_dir.join("fileC.txt")).unwrap(), "C v2");
+    assert_eq!(std::fs::read_to_string(restore_s4_dir.join("fileD.txt")).unwrap(), "D v1");
+    assert!(!restore_s4_dir.join("fileB.txt").exists());
 }
