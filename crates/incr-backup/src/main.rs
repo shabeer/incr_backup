@@ -106,6 +106,14 @@ enum Commands {
 
     /// List all snapshots.
     List {
+        /// Start of snapshot timestamp range (inclusive: first snapshot on or after this timestamp).
+        #[arg(long = "from", visible_alias = "start")]
+        from: Option<String>,
+
+        /// End of snapshot timestamp range (inclusive: latest snapshot on or before this timestamp).
+        #[arg(long = "to", visible_alias = "end")]
+        to: Option<String>,
+
         /// Output as JSON.
         #[arg(long)]
         json: bool,
@@ -355,8 +363,8 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
             cmd_sync(config, name, force)?;
         }
 
-        Commands::List { json } => {
-            cmd_list(config, json)?;
+        Commands::List { from, to, json } => {
+            cmd_list(config, from, to, json)?;
         }
 
         Commands::Status => {
@@ -646,15 +654,26 @@ fn cmd_sync(
     Ok(())
 }
 
-fn cmd_list(config: Config, json_output: bool) -> incr_backup::error::Result<()> {
+fn cmd_list(
+    config: Config,
+    from: Option<String>,
+    to: Option<String>,
+    json_output: bool,
+) -> incr_backup::error::Result<()> {
     let rclone = Rclone::new(&config);
     let remote_base = &config.remote_path;
 
     let mut all_meta = incr_backup::compact::discover_all_snapshots(&rclone, remote_base).unwrap_or_default();
     all_meta.sort_by_key(|s| s.created_at);
 
+    let filtered = incr_backup::changelog::filter_snapshots_by_bounds(
+        &all_meta,
+        from.as_deref(),
+        to.as_deref(),
+    )?;
+
     if json_output {
-        let snapshots: Vec<_> = all_meta
+        let snapshots: Vec<_> = filtered
             .iter()
             .map(|meta| {
                 serde_json::json!({
@@ -669,10 +688,10 @@ fn cmd_list(config: Config, json_output: bool) -> incr_backup::error::Result<()>
         println!("{}", serde_json::to_string_pretty(&snapshots)?);
     } else {
         println!("Snapshots at {}:\n", remote_base);
-        if all_meta.is_empty() {
+        if filtered.is_empty() {
             println!("  (no snapshots yet)");
         } else {
-            for snap in &all_meta {
+            for snap in filtered {
                 let display_time = config.timezone.format_display_datetime(snap.created_at);
                 println!(
                     "  {} ({} files, {}, {})",
@@ -683,7 +702,7 @@ fn cmd_list(config: Config, json_output: bool) -> incr_backup::error::Result<()>
                 );
             }
         }
-        println!("\nTotal: {} snapshots", all_meta.len());
+        println!("\nTotal: {} snapshots", filtered.len());
     }
 
     Ok(())

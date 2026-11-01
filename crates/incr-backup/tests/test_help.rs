@@ -78,4 +78,17 @@ fn test_changelog_help() {
     assert!(stdout_changelog.contains("--json"));
 }
 
+#[test]
+fn test_list_help() {
+    let env = TestEnv::new();
+
+    let assert_list = env.command().args(["list", "--help"]).assert().success();
+    let stdout_list = String::from_utf8(assert_list.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout_list.contains("List all snapshots"));
+    assert!(stdout_list.contains("--from"));
+    assert!(stdout_list.contains("--to"));
+    assert!(stdout_list.contains("--json"));
+}
+
 

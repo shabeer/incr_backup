@@ -225,6 +225,57 @@ pub fn diff_snapshot_pair(
     }
 }
 
+/// Filter a slice of chronologically sorted snapshots by optional start (`from`) and end (`to`) bounds.
+///
+/// Semantics match changelog:
+/// - `from`: first snapshot on or after this timestamp (inclusive).
+/// - `to`: latest snapshot on or before this timestamp (inclusive).
+/// - If `from` is specified and no snapshot is on or after it, returns empty.
+/// - If `to` is specified and no snapshot is on or before it, returns empty.
+/// - If `to` precedes `from`, returns empty.
+/// - If `snapshots` is empty, returns empty.
+pub fn filter_snapshots_by_bounds<'a>(
+    snapshots: &'a [SnapshotMeta],
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<&'a [SnapshotMeta]> {
+    if snapshots.is_empty() {
+        return Ok(&[]);
+    }
+
+    let from_dt = match from {
+        Some(s) => Some(parse_bound_timestamp(s, false, snapshots)?),
+        None => None,
+    };
+
+    let to_dt = match to {
+        Some(s) => Some(parse_bound_timestamp(s, true, snapshots)?),
+        None => None,
+    };
+
+    // Find the first snapshot on or after from_dt (or earliest snapshot if omitted)
+    let start_idx = match from_dt {
+        Some(f_dt) => snapshots.iter().position(|s| s.created_at >= f_dt),
+        None => Some(0),
+    };
+
+    // Find the latest snapshot on or before to_dt (or latest snapshot if omitted)
+    let end_idx = match to_dt {
+        Some(t_dt) => snapshots.iter().rposition(|s| s.created_at <= t_dt),
+        None => snapshots.len().checked_sub(1),
+    };
+
+    let (Some(start_idx), Some(end_idx)) = (start_idx, end_idx) else {
+        return Ok(&[]);
+    };
+
+    if end_idx < start_idx {
+        return Ok(&[]);
+    }
+
+    Ok(&snapshots[start_idx..=end_idx])
+}
+
 /// Run the changelog operation.
 pub fn run_changelog(
     config: &Config,
@@ -233,50 +284,18 @@ pub fn run_changelog(
 ) -> Result<ChangelogResult> {
     let all_snapshots = discover_all_snapshots(rclone, &config.remote_path)?;
 
-    if all_snapshots.is_empty() {
+    let in_range = filter_snapshots_by_bounds(
+        &all_snapshots,
+        options.from.as_deref(),
+        options.to.as_deref(),
+    )?;
+
+    if in_range.is_empty() {
         return Ok(ChangelogResult {
             initial: None,
             transitions: Vec::new(),
         });
     }
-
-    let from_dt = match &options.from {
-        Some(s) => Some(parse_bound_timestamp(s, false, &all_snapshots)?),
-        None => None,
-    };
-
-    let to_dt = match &options.to {
-        Some(s) => Some(parse_bound_timestamp(s, true, &all_snapshots)?),
-        None => None,
-    };
-
-    // Find the first snapshot on or after from_dt (or earliest snapshot if omitted)
-    let start_idx = match from_dt {
-        Some(f_dt) => all_snapshots.iter().position(|s| s.created_at >= f_dt),
-        None => Some(0),
-    };
-
-    // Find the latest snapshot on or before to_dt (or latest snapshot if omitted)
-    let end_idx = match to_dt {
-        Some(t_dt) => all_snapshots.iter().rposition(|s| s.created_at <= t_dt),
-        None => all_snapshots.len().checked_sub(1),
-    };
-
-    let (Some(start_idx), Some(end_idx)) = (start_idx, end_idx) else {
-        return Ok(ChangelogResult {
-            initial: None,
-            transitions: Vec::new(),
-        });
-    };
-
-    if end_idx < start_idx {
-        return Ok(ChangelogResult {
-            initial: None,
-            transitions: Vec::new(),
-        });
-    }
-
-    let in_range = &all_snapshots[start_idx..=end_idx];
 
     let initial_snap = &in_range[0];
     let initial_dirs = extract_directories(&initial_snap.manifest.files);
@@ -516,6 +535,63 @@ mod tests {
         assert!(formatted.contains("~ src/main.rs"));
         assert!(formatted.contains("+ docs"));
         assert!(formatted.contains("~ src"));
+    }
+
+    #[test]
+    fn test_filter_snapshots_by_bounds() {
+        let t1 = DateTime::parse_from_rfc3339("2026-10-28T08:00:00Z").unwrap().with_timezone(&Utc);
+        let t2 = DateTime::parse_from_rfc3339("2026-10-28T09:00:00Z").unwrap().with_timezone(&Utc);
+        let t3 = DateTime::parse_from_rfc3339("2026-10-28T10:00:00Z").unwrap().with_timezone(&Utc);
+
+        let snap1 = sample_meta("snap1", vec![], t1);
+        let snap2 = sample_meta("snap2", vec![], t2);
+        let snap3 = sample_meta("snap3", vec![], t3);
+
+        let snaps = vec![snap1, snap2, snap3];
+
+        // Empty bounds returns all
+        let res = filter_snapshots_by_bounds(&snaps, None, None).unwrap();
+        assert_eq!(res.len(), 3);
+
+        // Filter by name: from snap2
+        let res = filter_snapshots_by_bounds(&snaps, Some("snap2"), None).unwrap();
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].name, "snap2");
+        assert_eq!(res[1].name, "snap3");
+
+        // Filter by name: to snap2
+        let res = filter_snapshots_by_bounds(&snaps, None, Some("snap2")).unwrap();
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].name, "snap1");
+        assert_eq!(res[1].name, "snap2");
+
+        // Filter by name: from snap2 to snap2
+        let res = filter_snapshots_by_bounds(&snaps, Some("snap2"), Some("snap2")).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].name, "snap2");
+
+        // Filter by timestamp
+        let res = filter_snapshots_by_bounds(
+            &snaps,
+            Some("2026-10-28T08:30:00Z"),
+            Some("2026-10-28T09:30:00Z"),
+        )
+        .unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].name, "snap2");
+
+        // Inverted range
+        let res = filter_snapshots_by_bounds(&snaps, Some("snap3"), Some("snap1")).unwrap();
+        assert!(res.is_empty());
+
+        // Empty snapshots input
+        let empty: Vec<SnapshotMeta> = vec![];
+        let res = filter_snapshots_by_bounds(&empty, Some("snap1"), None).unwrap();
+        assert!(res.is_empty());
+
+        // Invalid bound error
+        let err = filter_snapshots_by_bounds(&snaps, Some("non-existent"), None).unwrap_err();
+        assert!(err.to_string().contains("Invalid timestamp or snapshot name"));
     }
 }
 

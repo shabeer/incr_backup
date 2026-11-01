@@ -231,7 +231,7 @@ Usage: incr-backup [OPTIONS] <COMMAND>
 Commands:
   init     Initialize a new backup configuration ([--source], [--remote], --adopt, --exclude)
   sync     Run a sync operation ([--name], --force)
-  list     List all snapshots (--json)
+  list     List all snapshots (--from, --to, --json)
   status   Show backup status and storage summary
   restore  Restore a snapshot to a local directory (--to, --path, --verify, --overwrite)
   diff      Show differences between two snapshots (--stat, --json, --only-added, --only-modified)
