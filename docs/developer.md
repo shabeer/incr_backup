@@ -1,4 +1,4 @@
-# incr-backup — Comprehensive Walkthrough
+# incr-backup — Developer Guide & Walkthrough
 
 > **Reverse-incremental snapshot backup orchestration tool for rclone cloud remotes (Google Drive, S3, etc.)**
 > 
@@ -28,6 +28,11 @@
 7. [Space Calculation & Deduplication Guarantee](#7-space-calculation--deduplication-guarantee)
 8. [Automated Cron Setup](#8-automated-cron-setup)
 9. [Rust Code Architecture for Java/Python Developers](#9-rust-code-architecture-for-javapython-developers)
+10. [Testing Strategy & Remote Mocking](#10-testing-strategy--remote-mocking)
+    - [Local Directory as Rclone Remote (Non-Live Tests)](#local-directory-as-rclone-remote-non-live-tests)
+    - [Live Google Drive Tests vs. Non-Live Tests](#live-google-drive-tests-vs-non-live-tests)
+    - [Dry-Run Subprocess Interception](#dry-run-subprocess-interception)
+    - [In-Memory Storage Backends for Unit Testing](#in-memory-storage-backends-for-unit-testing)
 
 ---
 
@@ -703,4 +708,56 @@ For engineers familiar with Java/Python, this codebase follows these design mapp
 | State Machine / Workflow Engine | Write-Ahead Journal with step status transitions | [`src/journal.rs`](src/journal.rs) |
 | Dict diffing `set(a) ^ set(b)` | Manifest HashMap comparison (`diff_manifests`) | [`src/manifest.rs`](src/manifest.rs) |
 | `git filter-repo` / History Purging | Purge files/dirs across manifests, current/, and diffs/ | [`src/remove.rs`](src/remove.rs) |
+
+---
+
+## 10. Testing Strategy & Remote Mocking
+
+How does `incr-backup` test cloud-native operations (like Google Drive server-side moves and directory manipulation) hermetically and fast without incurring API quotas or network latency?
+
+### Local Directory as Rclone Remote (Non-Live Tests)
+
+In non-live integration test suites (`test_restore.rs`, `test_sync.rs`, `test_compact.rs`, `test_journal_recovery.rs`, `test_init.rs`, `test_diff.rs`, `test_remove.rs`, `test_locking.rs`, `test_verify.rs`):
+
+1. **Sandboxed Local Workspaces (`TestEnv`)**:
+   In `crates/incr-backup/tests/common/mod.rs`, the `TestEnv` struct provisions an isolated local workspace containing both a `source` and a `remote` directory using temporary directories:
+   ```rust
+   let workspace = TempWorkspace::new();
+   let source_path = workspace.create_dir("source");
+   let remote_path = workspace.create_dir("remote");
+   ```
+2. **Rclone's Built-in Local Backend**:
+   When tests execute `incr-backup` CLI commands, they pass the local path to `--remote`:
+   ```bash
+   incr-backup sync --source /tmp/.../source --remote /tmp/.../remote
+   ```
+   Because `rclone` abstracts all storage targets under a common interface, any standard local directory path is automatically handled by `rclone`'s native **`local` backend**.
+   All key rclone commands used by `incr-backup`—including `--backup-dir`, server-side moves, `sync`, `copy`, `rcat`, `cat`, `lsjson`, `lsf`, `lsd`, `delete`, and `rmdirs`—execute identically to a remote Google Drive destination, but run 100% locally with zero network calls and zero cloud credentials.
+3. **Direct Local Filesystem Verification & Fault Injection**:
+   Because the mocked "remote" is an actual directory on the local disk:
+   - Tests can directly assert file system structures using Rust's `std::fs` (e.g., verifying `env.remote_path.join("current/doc.txt").exists()`).
+   - Tests can simulate crashed processes, network cuts, or concurrent lock holders by directly writing interrupted `.meta/lock` or `.meta/journal.json` files before resuming.
+
+### Live Google Drive Tests vs. Non-Live Tests
+
+| Feature | Non-Live Tests (`TestEnv`) | Live Tests (`LiveGdriveTestEnv`) |
+| :--- | :--- | :--- |
+| **Test Suites** | `test_restore.rs`, `test_sync.rs`, `test_compact.rs`, `test_journal_recovery.rs`, etc. | `test_live_gdrive.rs` |
+| **Target Remote** | Local directory path (e.g., `/tmp/.../remote`) | Actual Google Drive remote defined in `tests/incr-backup-testing.toml` |
+| **Network & Quotas** | Zero network, hermetic, runs in milliseconds | Requires network and consumes Google Drive API requests |
+| **Namespace Isolation**| Local `TempDir` automatically deleted on drop | Isolated timestamped cloud path (`live_{test_name}_{timestamp}_{pid}`) purged on `Drop` |
+| **Execution Prerequisite** | None (always runs with `cargo test`) | Skipped automatically if `tests/incr-backup-testing.toml` is absent or remote probe fails |
+
+### Dry-Run Subprocess Interception
+
+For unit testing the `Rclone` subprocess wrapper in `crates/incr-backup/src/rclone.rs`:
+- Tests configure `Rclone` with `dry_run = true`.
+- The generic `SubprocessRunner` (`crates/common/src/subprocess.rs`) intercepts mutating commands (`sync`, `rcat`, `delete`, `rmdirs`) and short-circuits them to return `Ok(String::new())` without executing the `rclone` binary or mutating files on disk.
+
+### In-Memory Storage Backends for Unit Testing
+
+At the component level:
+- Storage operations for advisory locking and write-ahead journaling implement traits (`LockBackend` in `common::lock` and `JournalBackend` in `common::journal`).
+- While `RcloneLockBackend` and `RcloneJournalBackend` target rclone in production, unit tests use `InMemoryLockBackend`, `InMemoryJournalBackend`, and `test_commons::mocks::MockStorage`.
+- These in-memory mocks manage state using thread-safe `Arc<Mutex<HashMap<String, String>>>` and provide failure-injection toggles (`set_fail_writes`, `set_fail_reads`) to test lock contention, recovery, and edge-case errors without spawning subprocesses.
 
