@@ -421,7 +421,7 @@ flowchart TD
    Mutating operations maintain catalog consistency:
    - `sync`: Appends/updates the new snapshot entry after manifest upload.
    - `compact`: Atomically deletes purged snapshot records and registers the consolidated snapshot entry.
-   - `remove`: Removes pruned snapshot entries when history is deleted.
+   - `remove_snapshots`: Removes pruned snapshot entries and sets `diff_dir = None` for the newly promoted baseline snapshot.
 
 6. **Bound Trait Abstraction (`SnapshotBoundItem`)**:
    [`changelog.rs`](src/changelog.rs) abstracts snapshot boundary resolution into `SnapshotBoundItem`, implemented for both `SnapshotSummary` and `SnapshotMeta`. Commands like `changelog` and `restore` read the lightweight catalog first, filter the target range, and only download full manifests for snapshots that are actually within the requested bounds.
@@ -441,7 +441,7 @@ flowchart TD
 3. **Lifecycle Synchronization**:
    - `sync` ([`crates/incr-backup/src/sync.rs`](../crates/incr-backup/src/sync.rs)): Appends or updates the newly created snapshot in the catalog after uploading the manifest.
    - `compact` ([`crates/incr-backup/src/compact.rs`](../crates/incr-backup/src/compact.rs)): Atomically replaces compacted source snapshot entries with the new consolidated snapshot entry.
-   - `remove` ([`crates/incr-backup/src/remove.rs`](../crates/incr-backup/src/remove.rs)): Removes pruned snapshot entries from the catalog.
+   - `remove_snapshots` ([`crates/incr-backup/src/remove.rs`](../crates/incr-backup/src/remove.rs)): Removes pruned snapshot entries and sets `diff_dir = None` for the promoted baseline snapshot.
 
 4. **Range Filtering & Trait Abstraction**:
    - Added `SnapshotBoundItem` trait to [`crates/incr-backup/src/changelog.rs`](../crates/incr-backup/src/changelog.rs) implemented for both `SnapshotSummary` and `SnapshotMeta`.
@@ -692,14 +692,15 @@ flowchart TD
     A["CLI: remove_snapshots --to <cutoff>"] --> B["Acquire Remote Advisory Lock (.meta/lock)"]
     B --> C["Discover Snapshots (.meta/manifests/*.json)"]
     C --> D["Resolve Cutoff & Partition:<br/>• to_remove (created_at <= cutoff)<br/>• to_keep (created_at > cutoff)"]
-    D --> E["Identify Diff Diffs to Purge:<br/>• All diffs/<dir> from to_remove<br/>• diffs/<dir> of first survivor S_first_after (orphaned history)"]
+    D --> E["Identify Diff Dirs to Purge:<br/>• All diffs/<dir> from to_remove<br/>• diffs/<dir> of first survivor S_first_after (orphaned history)"]
     E --> F{"Is Dry Run (-n)?"}
     F -->|Yes| G["Log Summary & Return Plan (0 mutations)"]
     F -->|No| H["Purge Remote Diff Directories (rclone purge)"]
     H --> I["Delete Manifests of Removed Snapshots (rclone deletefile)"]
-    I --> J["Clean Empty Dirs (rclone rmdirs --leave-root)"]
-    J --> K["Release Advisory Lock"]
-    G --> K
+    I --> J["Update Snapshot Catalog (.meta/snapshots.jsonl):<br/>• Remove deleted snapshots<br/>• Set diff_dir = None for S_first_after (clean baseline)"]
+    J --> K["Clean Empty Dirs (rclone rmdirs --leave-root)"]
+    K --> L["Release Advisory Lock"]
+    G --> L
 ```
 
 1. **Advisory Lock Acquisition**: Acquires `.meta/lock` (with `--force` option to break stale locks if needed).
@@ -711,7 +712,12 @@ flowchart TD
    - If at least one snapshot is deleted and surviving snapshots exist, it **also purges the diff directory of the first surviving snapshot ($S_{first\_after}$)**.
 4. **Purge & Commit**:
    - If `--dry-run` (`-n`) is active, logs all snapshots and diff directories that would be purged and exits without modifying remote storage.
-   - Otherwise, executes `rclone purge` for the target diff directories, deletes the corresponding JSON manifests from `.meta/manifests/`, cleans up empty subdirectories, and releases the lock.
+   - Otherwise, executes `rclone purge` for the target diff directories, deletes the corresponding JSON manifests from `.meta/manifests/`, and cleans up empty subdirectories.
+5. **Snapshot Catalog Synchronization (`.meta/snapshots.jsonl`)**:
+   - Immediately after deleting manifests, `remove_snapshots` calls `crate::catalog::remove_from_catalog(rclone, remote_base, &names_to_remove, &purged_diff_set)`.
+   - **Removes Pruned Records**: Drops all deleted snapshots from the catalog index.
+   - **Baseline Transition Guarantee**: Because $S_{first\_after}$ had its diff directory purged to become the new earliest baseline, the catalog sets its `diff_dir` to `None`, ensuring `snapshots.jsonl` accurately mirrors the remote filesystem.
+   - **Instant Listing**: Subsequent `incr-backup list` commands immediately return the updated snapshot count in a single network round-trip (< 0.2s) without needing a catalog rebuild.
 
 ---
 
