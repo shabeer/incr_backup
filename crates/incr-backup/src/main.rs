@@ -17,7 +17,7 @@ use incr_backup::diff::{DiffOptions, run_diff};
 use incr_backup::error::IncrError;
 use incr_backup::manifest::{format_size, Manifest};
 use incr_backup::rclone::Rclone;
-use incr_backup::remove::{RemoveOptions, run_remove};
+use incr_backup::remove::{RemoveOptions, RemoveSnapshotsOptions, run_remove, run_remove_snapshots};
 use incr_backup::restore::{RestoreOptions, run_restore};
 use incr_backup::verify::{VerifyOptions, format_verify_result, run_verify};
 
@@ -226,6 +226,22 @@ enum Commands {
         json: bool,
     },
 
+    /// Delete all snapshots up to and including a given cutoff timestamp.
+    #[command(name = "remove_snapshots", visible_alias = "remove-snapshots")]
+    RemoveSnapshots {
+        /// End of snapshot timestamp range (inclusive: all snapshots on or before this timestamp are deleted).
+        #[arg(long = "to", visible_alias = "end")]
+        to: String,
+
+        /// Break stale lock and run if locked.
+        #[arg(long)]
+        force: bool,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Consolidate multiple snapshots within a date range into a single named snapshot.
     Compact {
         /// Start of snapshot timestamp range (ISO-8601 with explicit timezone offset).
@@ -413,6 +429,10 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
             json,
         } => {
             cmd_remove(config, paths, path, force, json)?;
+        }
+
+        Commands::RemoveSnapshots { to, force, json } => {
+            cmd_remove_snapshots(config, to, force, json)?;
         }
 
         Commands::Compact {
@@ -985,6 +1005,80 @@ fn cmd_remove(
                 format_size(result.total_bytes_removed)
             );
             println!("\nTip: If you do not want this file/directory backed up in future syncs, add it to 'exclude.patterns' in incr-backup.toml.");
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_remove_snapshots(
+    config: Config,
+    to: String,
+    force: bool,
+    json: bool,
+) -> incr_backup::error::Result<()> {
+    let rclone = Rclone::new(&config);
+    let options = RemoveSnapshotsOptions {
+        to,
+        force_lock: force,
+        dry_run: config.dry_run,
+        json,
+    };
+
+    let result = run_remove_snapshots(&config, &rclone, &options)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if result.dry_run {
+        println!(
+            "[DRY-RUN] Simulating removal of snapshot(s) up to '{}' at {}:\n  Resolved cutoff: {}",
+            result.to,
+            config.remote_path,
+            config.timezone.format_display_datetime(result.to_timestamp)
+        );
+        if result.snapshots_removed == 0 {
+            println!("\n[DRY-RUN] No matching snapshots found on or before cutoff.");
+        } else {
+            println!("\n[DRY-RUN] Snapshots that would be deleted:");
+            for snap in &result.snapshots {
+                println!("  - {snap}");
+            }
+            if !result.diff_dirs_purged.is_empty() {
+                println!("\n[DRY-RUN] Diff directories that would be purged:");
+                for dir in &result.diff_dirs_purged {
+                    println!("  * diffs/{dir}/");
+                }
+            }
+            println!(
+                "\n[DRY-RUN] Summary: {} snapshot(s) would be deleted. {} snapshot(s) remaining.",
+                result.snapshots_removed, result.snapshots_remaining
+            );
+        }
+    } else {
+        println!(
+            "Removing snapshot(s) up to '{}' at {}:",
+            result.to, config.remote_path
+        );
+
+        if result.snapshots_removed == 0 {
+            println!("\nNo matching snapshots found on or before cutoff.");
+        } else {
+            println!("\nDeleted snapshots:");
+            for snap in &result.snapshots {
+                println!("  ✓ {snap}");
+            }
+
+            if !result.diff_dirs_purged.is_empty() {
+                println!("\nPurged diff directories:");
+                for dir in &result.diff_dirs_purged {
+                    println!("  ✓ diffs/{dir}/");
+                }
+            }
+
+            println!(
+                "\n✓ Successfully deleted {} snapshot(s). Remaining snapshots: {}.",
+                result.snapshots_removed, result.snapshots_remaining
+            );
         }
     }
 

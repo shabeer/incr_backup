@@ -24,6 +24,7 @@
 
 use std::collections::HashSet;
 
+use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,50 @@ use crate::rclone::Rclone;
 use crate::scanner::matches_glob;
 
 // ─── Options & Results ──────────────────────────────────────────────────────
+
+/// Options controlling the snapshot removal operation (`remove_snapshots`).
+#[derive(Debug, Clone)]
+pub struct RemoveSnapshotsOptions {
+    /// End of snapshot timestamp range (inclusive: all snapshots on or before this timestamp are deleted).
+    pub to: String,
+
+    /// If `true`, break an existing advisory lock if present.
+    pub force_lock: bool,
+
+    /// If `true`, simulate the removal without modifying remote files or manifests.
+    pub dry_run: bool,
+
+    /// If `true`, produce output in JSON format.
+    pub json: bool,
+}
+
+/// Summary result of a completed (or dry-run) `remove_snapshots` operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoveSnapshotsResult {
+    /// The target end timestamp / snapshot name requested.
+    pub to: String,
+
+    /// The resolved UTC cutoff timestamp (inclusive).
+    pub to_timestamp: DateTime<Utc>,
+
+    /// Total number of snapshot manifests scanned.
+    pub snapshots_scanned: usize,
+
+    /// Number of snapshots deleted (or would be deleted in dry-run).
+    pub snapshots_removed: usize,
+
+    /// Names of snapshots deleted (or would be deleted in dry-run).
+    pub snapshots: Vec<String>,
+
+    /// Diff directories purged (including diff directory of the first surviving snapshot, if any).
+    pub diff_dirs_purged: Vec<String>,
+
+    /// Remaining snapshot count after removal.
+    pub snapshots_remaining: usize,
+
+    /// Whether this was a dry-run simulation.
+    pub dry_run: bool,
+}
 
 /// Options controlling the remove operation.
 #[derive(Debug, Clone)]
@@ -369,6 +414,170 @@ fn run_remove_inner(
     })
 }
 
+// ─── Remove Snapshots Pipeline ──────────────────────────────────────────────
+
+/// Execute the removal of all snapshots up to and including a given cutoff timestamp.
+///
+/// # Workflow
+/// 1. Validate `--to` cutoff parameter.
+/// 2. Acquire remote advisory lock.
+/// 3. Discover all snapshots on remote.
+/// 4. Resolve cutoff timestamp via `parse_bound_timestamp`.
+/// 5. Filter snapshots with `created_at <= cutoff`.
+/// 6. Determine diff directories to purge (including diff directory of the first surviving snapshot,
+///    which contains only diffs against the deleted history).
+/// 7. If dry-run, log actions and return summary without modifications.
+/// 8. Purge diff directories, delete remote manifests, and clean up empty directories.
+/// 9. Release lock and return summary.
+pub fn run_remove_snapshots(
+    config: &Config,
+    rclone: &Rclone,
+    options: &RemoveSnapshotsOptions,
+) -> Result<RemoveSnapshotsResult> {
+    if options.to.trim().is_empty() {
+        return Err(IncrError::InvalidTarget(
+            "--to timestamp cannot be empty".to_string(),
+        ));
+    }
+
+    let remote_base = &config.remote_path;
+
+    // Step 1: Acquire advisory cloud lock
+    let lock_mgr = LockManager::new(rclone, remote_base, config.timezone);
+    if options.dry_run {
+        info!("[DRY-RUN] Would acquire remote lock");
+    } else {
+        lock_mgr.acquire(options.force_lock)?;
+        debug!("Remote lock acquired");
+    }
+
+    let result = run_remove_snapshots_inner(config, rclone, options);
+
+    if !options.dry_run {
+        if let Err(e) = lock_mgr.release() {
+            warn!("Failed to release remote lock: {e}");
+        } else {
+            debug!("Remote lock released");
+        }
+    }
+
+    result
+}
+
+fn run_remove_snapshots_inner(
+    config: &Config,
+    rclone: &Rclone,
+    options: &RemoveSnapshotsOptions,
+) -> Result<RemoveSnapshotsResult> {
+    let remote_base = &config.remote_path;
+
+    // Step 2: Discover all snapshots sorted chronologically
+    let mut all_snapshots = crate::compact::discover_all_snapshots(rclone, remote_base)?;
+    all_snapshots.sort_by_key(|s| s.created_at);
+
+    let snapshots_scanned = all_snapshots.len();
+
+    // Step 3: Parse cutoff timestamp
+    let cutoff_dt = crate::changelog::parse_bound_timestamp(&options.to, true, &all_snapshots)?;
+
+    // Step 4: Split snapshots into to_remove (<= cutoff_dt) and to_keep (> cutoff_dt)
+    let mut to_remove = Vec::new();
+    let mut to_keep = Vec::new();
+
+    for snap in all_snapshots {
+        if snap.created_at <= cutoff_dt {
+            to_remove.push(snap);
+        } else {
+            to_keep.push(snap);
+        }
+    }
+
+    let snapshots_removed = to_remove.len();
+    let snapshots_remaining = to_keep.len();
+    let snapshot_names: Vec<String> = to_remove.iter().map(|s| s.name.clone()).collect();
+
+    // Step 5: Determine diff directories to purge
+    let mut diff_dirs_to_purge = Vec::new();
+
+    // 5a. Diffs belonging to the snapshots being deleted
+    for snap in &to_remove {
+        if let Some(ref dir) = snap.diff_dir {
+            if !diff_dirs_to_purge.contains(dir) {
+                diff_dirs_to_purge.push(dir.clone());
+            }
+        }
+    }
+
+    // 5b. If we removed at least one snapshot, and there is a surviving snapshot,
+    // its diff directory contains diffs against the deleted history.
+    // Purge it so the surviving snapshot becomes a clean baseline with zero orphaned files.
+    if !to_remove.is_empty() && let Some(first_survivor) = to_keep.first() {
+        if let Some(ref dir) = first_survivor.diff_dir {
+            if !diff_dirs_to_purge.contains(dir) {
+                diff_dirs_to_purge.push(dir.clone());
+            }
+        }
+    }
+
+    diff_dirs_to_purge.sort();
+
+    // Step 6: If dry-run, return plan without mutating
+    if options.dry_run {
+        info!(
+            "[DRY-RUN] Would delete {} snapshot(s) up to {} (cutoff: {})",
+            snapshots_removed, options.to, cutoff_dt
+        );
+        for name in &snapshot_names {
+            info!("[DRY-RUN] Would delete snapshot '{}'", name);
+        }
+        for dir in &diff_dirs_to_purge {
+            info!("[DRY-RUN] Would purge diffs/{}", dir);
+        }
+        return Ok(RemoveSnapshotsResult {
+            to: options.to.clone(),
+            to_timestamp: cutoff_dt,
+            snapshots_scanned,
+            snapshots_removed,
+            snapshots: snapshot_names,
+            diff_dirs_purged: diff_dirs_to_purge,
+            snapshots_remaining,
+            dry_run: true,
+        });
+    }
+
+    // Step 7: Delete physical diff directories on remote
+    for dir in &diff_dirs_to_purge {
+        let diff_path = format!("{remote_base}/diffs/{dir}");
+        debug!("Purging diff directory {}", diff_path);
+        let _ = rclone.purge(&diff_path);
+    }
+    let _ = rclone.rmdirs(&format!("{remote_base}/diffs/"), true);
+
+    // Step 8: Delete manifests of removed snapshots
+    let manifests_dir = format!("{remote_base}/.meta/manifests/");
+    for snap in &to_remove {
+        let manifest_file_path = format!("{manifests_dir}{}", snap.manifest_name);
+        debug!("Deleting manifest {}", manifest_file_path);
+        rclone.delete_file(&manifest_file_path)?;
+    }
+
+    info!(
+        "Successfully deleted {} snapshot(s) up to {}. Remaining snapshots: {}",
+        snapshots_removed, options.to, snapshots_remaining
+    );
+
+    Ok(RemoveSnapshotsResult {
+        to: options.to.clone(),
+        to_timestamp: cutoff_dt,
+        snapshots_scanned,
+        snapshots_removed,
+        snapshots: snapshot_names,
+        diff_dirs_purged: diff_dirs_to_purge,
+        snapshots_remaining,
+        dry_run: false,
+    })
+}
+
 // ─── Unit Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -415,5 +624,18 @@ mod tests {
         assert!(matches_target("logs/app.log", "logs/*.log"));
         assert!(!matches_target("other/app.log", "logs/*.log"));
         assert!(!matches_target("certs/public.crt", "*.key"));
+    }
+
+    #[test]
+    fn test_remove_snapshots_empty_target_fails() {
+        let config = Config::default();
+        let rclone = Rclone::new(&config);
+        let options = RemoveSnapshotsOptions {
+            to: "".to_string(),
+            force_lock: false,
+            dry_run: true,
+            json: false,
+        };
+        assert!(run_remove_snapshots(&config, &rclone, &options).is_err());
     }
 }

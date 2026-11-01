@@ -22,6 +22,7 @@
    - [compact & Dynamic Snapshot Consolidation](#compact--dynamic-snapshot-consolidation)
    - [verify & space analysis](#verify--space-analysis)
    - [remove & snapshot history purging](#remove--snapshot-history-purging)
+   - [remove_snapshots: Pruning Past Snapshots by Timestamp](#removesnapshots-pruning-past-snapshots-by-timestamp)
    - [config: synchronizing local & remote metadata](#config-synchronizing-local--remote-metadata)
 5. [Crash Recovery: Write-Ahead Journal (WAL)](#5-crash-recovery-write-ahead-journal-wal)
 6. [Advisory Locking & Concurrency](#6-advisory-locking--concurrency)
@@ -562,6 +563,109 @@ incr-backup remove customer_records/ --json
 
 ---
 
+### `remove_snapshots`: Pruning Past Snapshots by Timestamp
+
+#### Overview & Purpose:
+While `remove` purges specific file paths across all historical snapshots, `remove_snapshots` (visible alias: `remove-snapshots`) drops **entire snapshot recovery points** from the remote repository up to and including a specified cutoff timestamp (`--to <timestamp>`):
+
+```bash
+incr-backup remove_snapshots --to <timestamp> [--force] [--json] [-n / --dry-run]
+```
+
+This is the reverse-incremental equivalent of retention policy pruning (e.g. `restic forget` or `git prune`), enabling automated or manual cleanup of older historical snapshots.
+
+#### Supported Cutoff Formats (`--to`):
+- **Exact Snapshot Name / Stem**: `--to 2026-10-28T08-00Z` or `--to snap-10:00` (resolves to that snapshot's exact creation time).
+- **Date-Only**: `--to 2026-10-28` (treated as an end bound, matching up to `2026-10-28T23:59:59.999Z`).
+- **ISO-8601 / RFC-3339**: `--to 2026-10-28T12:00:00+05:30` or `--to 2026-10-28T06:30:00Z`.
+
+#### The Removal Pipeline:
+
+```mermaid
+flowchart TD
+    A["CLI: remove_snapshots --to <cutoff>"] --> B["Acquire Remote Advisory Lock (.meta/lock)"]
+    B --> C["Discover Snapshots (.meta/manifests/*.json)"]
+    C --> D["Resolve Cutoff & Partition:<br/>• to_remove (created_at <= cutoff)<br/>• to_keep (created_at > cutoff)"]
+    D --> E["Identify Diff Diffs to Purge:<br/>• All diffs/<dir> from to_remove<br/>• diffs/<dir> of first survivor S_first_after (orphaned history)"]
+    E --> F{"Is Dry Run (-n)?"}
+    F -->|Yes| G["Log Summary & Return Plan (0 mutations)"]
+    F -->|No| H["Purge Remote Diff Directories (rclone purge)"]
+    H --> I["Delete Manifests of Removed Snapshots (rclone deletefile)"]
+    I --> J["Clean Empty Dirs (rclone rmdirs --leave-root)"]
+    J --> K["Release Advisory Lock"]
+    G --> K
+```
+
+1. **Advisory Lock Acquisition**: Acquires `.meta/lock` (with `--force` option to break stale locks if needed).
+2. **Snapshot Discovery & Partitioning**: Reads all manifests from `.meta/manifests/` (excluding `current.json`), sorts them chronologically, and partitions them into:
+   - `to_remove`: All snapshots whose `created_at <= cutoff_timestamp`.
+   - `to_keep`: All snapshots whose `created_at > cutoff_timestamp`.
+3. **Diff Directories Determination**:
+   - Gathers all diff directories associated with `to_remove`.
+   - If at least one snapshot is deleted and surviving snapshots exist, it **also purges the diff directory of the first surviving snapshot ($S_{first\_after}$)**.
+4. **Purge & Commit**:
+   - If `--dry-run` (`-n`) is active, logs all snapshots and diff directories that would be purged and exits without modifying remote storage.
+   - Otherwise, executes `rclone purge` for the target diff directories, deletes the corresponding JSON manifests from `.meta/manifests/`, cleans up empty subdirectories, and releases the lock.
+
+---
+
+#### Evaluation: Does It Affect Restoring Snapshots Timestamped After `given_timestamp`?
+
+**Verdict: No. Restoring any snapshot timestamped after `given_timestamp` is completely unaffected, retaining 100% data integrity and passing all `--verify` checksum checks.**
+
+##### Why Surviving Snapshots Remain 100% Restorable:
+
+1. **Discrete, Independent Manifests**:
+   Every snapshot maintains its own discrete manifest in `.meta/manifests/<name>.json`. This manifest contains the full catalog of files, paths, sizes, and MD5 checksums at that snapshot point. Surviving snapshots do not inherit from or link to deleted manifests.
+2. **Reverse-Incremental Data Flow**:
+   - The remote mirror `current/` always holds the latest state of all files.
+   - In reverse-incremental backups, when snapshot $S_k$ is created, only older files overwritten or deleted by $S_k$ are moved into `diffs/S_k`. That means diffs store versions looking **backwards** in time.
+   - When restoring any surviving snapshot $S_{target} > T$:
+     - If a file was modified in a later snapshot $S_{later} > S_{target}$, its $S_{target}$ version was preserved in `diffs/S_{later}`.
+     - If a file was never modified after $S_{target}$, it resides in `current/`.
+     - Location resolution **only searches forward** into diff directories created *after* $S_{target}$ (`snap.created_at > target_manifest.created_at`) and `current/`.
+     - **It never reads or references diff directories or manifests created at or before $T$**.
+3. **Baseline Transition for the First Surviving Snapshot ($S_{first\_after}$)**:
+   - What was inside `diffs/S_{first_after}`? It stored files from the snapshot immediately preceding it ($S_{last\_deleted}$) that were changed when $S_{first\_after}$ was synced.
+   - Because $S_{last\_deleted}$ and all prior snapshots are deleted, **no surviving snapshot ($S \ge S_{first\_after}$) ever needs those files**.
+   - Purging `diffs/S_{first_after}` safely reclaims the disk/cloud space of the deleted history and cleanly promotes $S_{first\_after}$ to the new earliest baseline snapshot.
+
+---
+
+#### Comparison: `remove_snapshots` vs. `compact`
+
+| Feature / Trade-off | `remove_snapshots --to T` | `compact --from T1 --to T2` |
+| :--- | :--- | :--- |
+| **Primary Goal** | Drop historical snapshots prior to a cutoff (retention pruning). | Consolidate multiple fine-grained snapshots into one named snapshot (history preservation). |
+| **Recovery Points** | **Permanently dropped**: All points at or before $T$ are gone forever. | **Consolidated**: Earlier points within range are rolled into a single anchor snapshot; pre-range restore remains intact. |
+| **Pre-Range History** | Recovery prior to $T$ is impossible. | Preserved. Rollbacks before $T_1$ remain fully functional. |
+| **Historical Diffs** | `diff` and `changelog` across the cutoff boundary are no longer possible (fails with `SnapshotNotFound`). | Preserves consolidated manifests for long-term diffing and changelog tracking. |
+| **Bandwidth & Remote Operations** | Deletes remote files/directories directly via server-side purge. | Two-phase staged server-side copy, hash verification, commit, and purge. |
+
+#### Examples:
+
+```bash
+# Delete all snapshots up to a specific ISO-8601 timestamp
+incr-backup remove_snapshots --to 2026-10-28T12:00:00+05:30
+
+# Delete all snapshots up to a named snapshot (inclusive)
+incr-backup remove_snapshots --to snap2
+
+# Delete all snapshots from a specific date (matches end of day)
+incr-backup remove_snapshots --to 2026-10-27
+
+# Dry-run preview of what would be removed
+incr-backup remove_snapshots --to snap2 --dry-run
+
+# Output structured JSON for cron scripts or automation
+incr-backup remove_snapshots --to 2026-10-28 --json
+
+# Break a stale lock if necessary
+incr-backup remove_snapshots --to snap2 --force
+```
+
+---
+
 ### `config`: Synchronizing Local & Remote Metadata
 
 The remote stores a metadata record at `.meta/config.json`. Local configurations live in `incr-backup.toml` (or custom paths specified via `-c / --config`).
@@ -708,6 +812,7 @@ For engineers familiar with Java/Python, this codebase follows these design mapp
 | State Machine / Workflow Engine | Write-Ahead Journal with step status transitions | [`src/journal.rs`](src/journal.rs) |
 | Dict diffing `set(a) ^ set(b)` | Manifest HashMap comparison (`diff_manifests`) | [`src/manifest.rs`](src/manifest.rs) |
 | `git filter-repo` / History Purging | Purge files/dirs across manifests, current/, and diffs/ | [`src/remove.rs`](src/remove.rs) |
+| `restic forget` / Snapshot Pruning | Prune historical snapshots on or before cutoff timestamp | [`src/remove.rs`](src/remove.rs) |
 
 ---
 
@@ -717,7 +822,7 @@ How does `incr-backup` test cloud-native operations (like Google Drive server-si
 
 ### Local Directory as Rclone Remote (Non-Live Tests)
 
-In non-live integration test suites (`test_restore.rs`, `test_sync.rs`, `test_compact.rs`, `test_journal_recovery.rs`, `test_init.rs`, `test_diff.rs`, `test_remove.rs`, `test_locking.rs`, `test_verify.rs`):
+In non-live integration test suites (`test_restore.rs`, `test_sync.rs`, `test_compact.rs`, `test_journal_recovery.rs`, `test_init.rs`, `test_diff.rs`, `test_remove.rs`, `test_remove_snapshots.rs`, `test_locking.rs`, `test_verify.rs`):
 
 1. **Sandboxed Local Workspaces (`TestEnv`)**:
    In `crates/incr-backup/tests/common/mod.rs`, the `TestEnv` struct provisions an isolated local workspace containing both a `source` and a `remote` directory using temporary directories:

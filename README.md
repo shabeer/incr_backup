@@ -142,7 +142,20 @@ incr-backup remove documents/confidential/
 incr-backup remove build/ --dry-run
 ```
 
-### 8. Manage Configuration Between Local and Remote (`config`)
+### 8. Remove Past Snapshots (`remove_snapshots` / `remove-snapshots`)
+
+```bash
+# Delete all snapshots up to and including a cutoff timestamp or snapshot name
+incr-backup remove_snapshots --to 2026-10-28T12:00:00+05:30
+
+# Delete snapshots up to a named snapshot
+incr-backup remove_snapshots --to snap-10:00
+
+# Dry-run preview of which snapshots and diff directories would be deleted
+incr-backup remove_snapshots --to 2026-10-28 -n
+```
+
+### 9. Manage Configuration Between Local and Remote (`config`)
 
 ```bash
 # Compare local configuration vs remote metadata (.meta/config.json)
@@ -239,6 +252,7 @@ Commands:
   verify    Verify backup integrity (--space, --check-hashes, --deep)
   compact  Consolidate snapshots in a date range into a single snapshot (--from, --to, --name, --summary, --full-list)
   remove   Remove a given directory or file(s) from all snapshots (alias: rm) (--path, --force, --json)
+  remove_snapshots Delete all snapshots up to and including a given cutoff timestamp (alias: remove-snapshots) (--to, --force, --json)
   config   Manage configuration between local file and remote metadata (push, pull, diff)
   help     Print help information
 
