@@ -77,7 +77,8 @@ fn test_sync_basic_and_incremental() {
         .stdout(predicate::str::contains("Total:"));
 
     // 5. Test status command
-    env.command()
+    let mut status_assert = env
+        .command()
         .args([
             "status",
             "--source",
@@ -87,7 +88,13 @@ fn test_sync_basic_and_incremental() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Backup status"));
+        .stdout(predicate::str::contains("Backup status"))
+        .stdout(predicate::str::contains("Current:"))
+        .stdout(predicate::str::contains("Diffs:"));
+
+    for dir in &diff_dirs {
+        status_assert = status_assert.stdout(predicate::str::contains(format!("  {}: 2 files", dir)));
+    }
 }
 
 #[test]

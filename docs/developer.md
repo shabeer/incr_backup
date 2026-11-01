@@ -173,6 +173,7 @@ Remote:     gdrive:backups/myhost
 Lock:       (none)
 Current:    45,235 files, 200.1 GB
 Diffs:      12 files, 4.2 MB
+  2026-10-28T08-00Z: 12 files, 4.2 MB
 ```
 
 ### Step 4: Compare Snapshots

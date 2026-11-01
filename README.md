@@ -89,7 +89,7 @@ incr-backup sync --timezone local
 ### 3. Inspect Status and Snapshots
 
 ```bash
-# Overview of backup storage, locks, and configuration
+# Overview of backup storage, locks, configuration, and file counts/sizes of each diff directory
 incr-backup status
 
 # List all retained snapshots
@@ -245,7 +245,7 @@ Commands:
   init     Initialize a new backup configuration ([--source], [--remote], --adopt, --exclude)
   sync     Run a sync operation ([--name], --force)
   list     List all snapshots (--from, --to, --json)
-  status   Show backup status and storage summary
+  status   Show backup status and storage summary (including per-diff directory breakdown)
   restore  Restore a snapshot to a local directory (--to, --path, --verify, --overwrite)
   diff      Show differences between two snapshots (--stat, --json, --only-added, --only-modified)
   changelog Show changelog across snapshots (--from, --to, --json)
@@ -296,6 +296,7 @@ RUST_LOG=info cargo test -- --nocapture
 Test coverage includes:
 - **`test_init.rs`**: Basic init, config-based init, adopt pre-existing files, duplicate protection, nonexistent source handling.
 - **`test_sync.rs`**: Full sync pipeline, incremental diff tracking, dry-run mode, status inspection, and timezone arguments (`--timezone local`, `--tz utc`).
+- **`test_status.rs`**: Storage summary inspection, lock detection, and per-diff directory breakdown of file counts and sizes.
 - **`test_restore.rs`**: Current restore, point-in-time restore from diffs, overwrite protection, checksum validation.
 - **`test_diff.rs`**: Added, modified, deleted file diff detection, stat summaries, and JSON serialization.
 - **`test_changelog.rs`**: Chronological snapshot evolution, directory and file delta tracking, range filters (`--from`, `--to`), and JSON output.

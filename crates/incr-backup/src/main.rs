@@ -10,6 +10,7 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use log::{error, info};
+use rayon::prelude::*;
 
 use incr_backup::changelog::{format_changelog, run_changelog, ChangelogOptions};
 use incr_backup::config::{CliOverrides, Config, SnapshotTimezone};
@@ -801,6 +802,22 @@ fn cmd_status(config: Config) -> incr_backup::error::Result<()> {
     }
     if let Ok(size) = rclone.size(&format!("{}/diffs/", remote_base)) {
         println!("Diffs:      {} files, {}", size.count, format_size(size.bytes));
+    }
+    if let Ok(mut diff_dirs) = rclone.lsd(&format!("{}/diffs/", remote_base)) {
+        diff_dirs.sort();
+        let dir_sizes: Vec<(String, incr_backup::error::Result<incr_backup::rclone::SizeOutput>)> = diff_dirs
+            .par_iter()
+            .map(|dir| {
+                let size = rclone.size(&format!("{}/diffs/{}/", remote_base, dir));
+                (dir.clone(), size)
+            })
+            .collect();
+
+        for (dir, size_res) in dir_sizes {
+            if let Ok(size) = size_res {
+                println!("  {}: {} files, {}", dir, size.count, format_size(size.bytes));
+            }
+        }
     }
 
     Ok(())
