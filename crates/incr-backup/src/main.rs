@@ -27,6 +27,7 @@ use incr_backup::verify::{VerifyOptions, format_verify_result, run_verify};
 /// mirror of the source, directly browseable on Google Drive.
 #[derive(Parser, Debug)]
 #[command(name = "incr-backup", version, about, long_about = None)]
+#[command(next_help_heading = "Global Options")]
 struct Cli {
     /// Config file path.
     #[arg(short = 'c', long = "config", default_value = "./incr-backup.toml", env = "INCR_BACKUP_CONFIG", global = true)]
@@ -134,13 +135,13 @@ enum Commands {
         overwrite: bool,
     },
 
-    /// Show differences between two snapshots.
+    /// Show differences between two snapshots (snapshot1 should be older and snapshot2 should be newer).
     Diff {
-        /// First snapshot.
-        snapshot_a: String,
+        /// First snapshot - should be older.
+        snapshot1: String,
 
-        /// Second snapshot.
-        snapshot_b: String,
+        /// Second snapshot - should be newer.
+        snapshot2: String,
 
         /// JSON output.
         #[arg(long)]
@@ -357,15 +358,15 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
         }
 
         Commands::Diff {
-            snapshot_a,
-            snapshot_b,
+            snapshot1,
+            snapshot2,
             json,
             only_added,
             only_deleted,
             only_modified,
             stat,
         } => {
-            cmd_diff(config, &snapshot_a, &snapshot_b, json, only_added, only_deleted, only_modified, stat)?;
+            cmd_diff(config, &snapshot1, &snapshot2, json, only_added, only_deleted, only_modified, stat)?;
         }
 
         Commands::Verify {
