@@ -10,10 +10,10 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::compact::{discover_all_snapshots, SnapshotMeta};
+use crate::compact::SnapshotMeta;
 use crate::config::{Config, SnapshotTimezone};
 use crate::error::{IncrError, Result};
-use crate::manifest::{self, FileEntry};
+use crate::manifest::{self, FileEntry, Manifest};
 use crate::rclone::Rclone;
 
 // ─── Options & Data Structures ──────────────────────────────────────────────
@@ -107,18 +107,49 @@ pub fn extract_directories(files: &[FileEntry]) -> HashSet<String> {
 
 // ─── Core Logic ─────────────────────────────────────────────────────────────
 
+/// Trait for snapshot representations that can be resolved and filtered by boundary conditions.
+pub trait SnapshotBoundItem {
+    fn name(&self) -> &str;
+    fn manifest_name(&self) -> &str;
+    fn created_at(&self) -> DateTime<Utc>;
+}
+
+impl SnapshotBoundItem for SnapshotMeta {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn manifest_name(&self) -> &str {
+        &self.manifest_name
+    }
+    fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+}
+
+impl SnapshotBoundItem for crate::catalog::SnapshotSummary {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn manifest_name(&self) -> &str {
+        &self.manifest_name
+    }
+    fn created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+}
+
 /// Parse a boundary timestamp string or snapshot name.
-pub fn parse_bound_timestamp(
+pub fn parse_bound_timestamp<T: SnapshotBoundItem>(
     input: &str,
     is_end_bound: bool,
-    snapshots: &[SnapshotMeta],
+    snapshots: &[T],
 ) -> Result<DateTime<Utc>> {
     // 1. Check if input matches an existing snapshot name or stem
     if let Some(snap) = snapshots
         .iter()
-        .find(|s| s.name == input || s.manifest_name.trim_end_matches(".json") == input)
+        .find(|s| s.name() == input || s.manifest_name().trim_end_matches(".json") == input)
     {
-        return Ok(snap.created_at);
+        return Ok(snap.created_at());
     }
 
     // 2. Check if input is a date-only "YYYY-MM-DD"
@@ -234,11 +265,11 @@ pub fn diff_snapshot_pair(
 /// - If `to` is specified and no snapshot is on or before it, returns empty.
 /// - If `to` precedes `from`, returns empty.
 /// - If `snapshots` is empty, returns empty.
-pub fn filter_snapshots_by_bounds<'a>(
-    snapshots: &'a [SnapshotMeta],
+pub fn filter_snapshots_by_bounds<'a, T: SnapshotBoundItem>(
+    snapshots: &'a [T],
     from: Option<&str>,
     to: Option<&str>,
-) -> Result<&'a [SnapshotMeta]> {
+) -> Result<&'a [T]> {
     if snapshots.is_empty() {
         return Ok(&[]);
     }
@@ -255,13 +286,13 @@ pub fn filter_snapshots_by_bounds<'a>(
 
     // Find the first snapshot on or after from_dt (or earliest snapshot if omitted)
     let start_idx = match from_dt {
-        Some(f_dt) => snapshots.iter().position(|s| s.created_at >= f_dt),
+        Some(f_dt) => snapshots.iter().position(|s| s.created_at() >= f_dt),
         None => Some(0),
     };
 
     // Find the latest snapshot on or before to_dt (or latest snapshot if omitted)
     let end_idx = match to_dt {
-        Some(t_dt) => snapshots.iter().rposition(|s| s.created_at <= t_dt),
+        Some(t_dt) => snapshots.iter().rposition(|s| s.created_at() <= t_dt),
         None => snapshots.len().checked_sub(1),
     };
 
@@ -282,20 +313,37 @@ pub fn run_changelog(
     rclone: &Rclone,
     options: &ChangelogOptions,
 ) -> Result<ChangelogResult> {
-    let all_snapshots = discover_all_snapshots(rclone, &config.remote_path)?;
+    let all_summaries = crate::catalog::load_snapshot_catalog(rclone, &config.remote_path)?;
 
-    let in_range = filter_snapshots_by_bounds(
-        &all_snapshots,
+    let in_range_summaries = filter_snapshots_by_bounds(
+        &all_summaries,
         options.from.as_deref(),
         options.to.as_deref(),
     )?;
 
-    if in_range.is_empty() {
+    if in_range_summaries.is_empty() {
         return Ok(ChangelogResult {
             initial: None,
             transitions: Vec::new(),
         });
     }
+
+    // Only fetch full manifests for snapshots within the requested bound range
+    let in_range: Vec<SnapshotMeta> = in_range_summaries
+        .iter()
+        .map(|summary| {
+            let manifest_path = format!("{}/.meta/manifests/{}", config.remote_path, summary.manifest_name);
+            let content = rclone.cat(&manifest_path)?;
+            let manifest = Manifest::from_json(&content)?;
+            Ok(SnapshotMeta {
+                name: summary.name.clone(),
+                manifest_name: summary.manifest_name.clone(),
+                created_at: summary.created_at,
+                diff_dir: summary.diff_dir.clone(),
+                manifest,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let initial_snap = &in_range[0];
     let initial_dirs = extract_directories(&initial_snap.manifest.files);

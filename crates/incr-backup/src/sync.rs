@@ -198,6 +198,19 @@ impl<'a> SyncPipeline<'a> {
             let current_manifest_path = format!("{remote_base}/.meta/manifests/current.json");
             self.rclone.rcat(&current_manifest_path, &manifest_json)?;
 
+            // Update snapshot catalog
+            let summary = crate::catalog::SnapshotSummary {
+                name: snapshot_name.clone(),
+                manifest_name: format!("{snapshot_name}.json"),
+                created_at: manifest.created_at,
+                diff_dir: Some(snapshot_name.clone()),
+                file_count: manifest.file_count,
+                total_size: manifest.total_size,
+            };
+            if let Err(e) = crate::catalog::append_or_update_catalog_entry(&self.rclone, remote_base, summary) {
+                warn!("Failed to update snapshot catalog: {e}");
+            }
+
             self.journal_mgr
                 .update_step("upload_manifest", StepStatus::Done)?;
         }
@@ -327,6 +340,18 @@ impl<'a> SyncPipeline<'a> {
                         let current_manifest_path =
                             format!("{remote_base}/.meta/manifests/current.json");
                         self.rclone.rcat(&current_manifest_path, &manifest_json)?;
+
+                        let summary = crate::catalog::SnapshotSummary {
+                            name: snapshot_name.to_string(),
+                            manifest_name: format!("{snapshot_name}.json"),
+                            created_at: manifest.created_at,
+                            diff_dir: Some(snapshot_name.to_string()),
+                            file_count: manifest.file_count,
+                            total_size: manifest.total_size,
+                        };
+                        if let Err(e) = crate::catalog::append_or_update_catalog_entry(&self.rclone, remote_base, summary) {
+                            warn!("Failed to update snapshot catalog: {e}");
+                        }
 
                         self.journal_mgr
                             .update_step("upload_manifest", StepStatus::Done)?;

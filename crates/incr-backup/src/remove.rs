@@ -555,11 +555,17 @@ fn run_remove_snapshots_inner(
 
     // Step 8: Delete manifests of removed snapshots
     let manifests_dir = format!("{remote_base}/.meta/manifests/");
+    let mut names_to_remove = HashSet::new();
     for snap in &to_remove {
         let manifest_file_path = format!("{manifests_dir}{}", snap.manifest_name);
         debug!("Deleting manifest {}", manifest_file_path);
         rclone.delete_file(&manifest_file_path)?;
+        names_to_remove.insert(snap.name.clone());
+        names_to_remove.insert(snap.manifest_name.clone());
     }
+
+    // Update remote snapshot catalog
+    let _ = crate::catalog::remove_from_catalog(rclone, remote_base, &names_to_remove);
 
     info!(
         "Successfully deleted {} snapshot(s) up to {}. Remaining snapshots: {}",

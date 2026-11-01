@@ -203,3 +203,64 @@ fn test_list_from_and_to_filters() {
         .stderr(predicate::str::contains("Invalid timestamp or snapshot name"));
 }
 
+#[test]
+fn test_list_catalog_fast_path_and_self_healing() {
+    let env = TestEnv::new();
+
+    // Initialize repo
+    env.write_source_file("f1.txt", b"v1");
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str()])
+        .assert()
+        .success();
+
+    // Snapshot 1
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap1"])
+        .assert()
+        .success();
+
+    // Snapshot 2
+    env.write_source_file("f2.txt", b"v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap2"])
+        .assert()
+        .success();
+
+    // Verify .meta/snapshots.jsonl was created and contains both snapshots
+    let catalog_path = env.remote_path.join(".meta/snapshots.jsonl");
+    assert!(catalog_path.exists(), "snapshots.jsonl catalog should exist after sync");
+    let content = std::fs::read_to_string(&catalog_path).unwrap();
+    assert!(content.contains("snap1"));
+    assert!(content.contains("snap2"));
+
+    // List reads quickly from catalog
+    env.command()
+        .args(["list", "--remote", &env.remote_str()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("snap1"))
+        .stdout(predicate::str::contains("snap2"))
+        .stdout(predicate::str::contains("Total: 2 snapshots"));
+
+    // Simulate self-healing: remove catalog file
+    std::fs::remove_file(&catalog_path).unwrap();
+    assert!(!catalog_path.exists());
+
+    // Run list: it should rebuild the catalog from manifests and succeed
+    env.command()
+        .args(["list", "--remote", &env.remote_str()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("snap1"))
+        .stdout(predicate::str::contains("snap2"))
+        .stdout(predicate::str::contains("Total: 2 snapshots"));
+
+    // Verify catalog was self-healed
+    assert!(catalog_path.exists(), "snapshots.jsonl catalog should be recreated by self-healing");
+    let healed_content = std::fs::read_to_string(&catalog_path).unwrap();
+    assert!(healed_content.contains("snap1"));
+    assert!(healed_content.contains("snap2"));
+}
+
+

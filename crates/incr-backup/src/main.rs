@@ -683,11 +683,12 @@ fn cmd_list(
     let rclone = Rclone::new(&config);
     let remote_base = &config.remote_path;
 
-    let mut all_meta = incr_backup::compact::discover_all_snapshots(&rclone, remote_base).unwrap_or_default();
-    all_meta.sort_by_key(|s| s.created_at);
+    let mut all_summaries = incr_backup::catalog::load_snapshot_catalog(&rclone, remote_base)
+        .unwrap_or_default();
+    all_summaries.sort_by_key(|s| s.created_at);
 
     let filtered = incr_backup::changelog::filter_snapshots_by_bounds(
-        &all_meta,
+        &all_summaries,
         from.as_deref(),
         to.as_deref(),
     )?;
@@ -695,13 +696,13 @@ fn cmd_list(
     if json_output {
         let snapshots: Vec<_> = filtered
             .iter()
-            .map(|meta| {
+            .map(|s| {
                 serde_json::json!({
-                    "name": meta.name,
-                    "timestamp": meta.created_at.to_rfc3339(),
-                    "dir_name": meta.diff_dir,
-                    "files": meta.manifest.file_count,
-                    "size": meta.manifest.total_size,
+                    "name": s.name,
+                    "timestamp": s.created_at.to_rfc3339(),
+                    "dir_name": s.diff_dir,
+                    "files": s.file_count,
+                    "size": s.total_size,
                 })
             })
             .collect();
@@ -716,8 +717,8 @@ fn cmd_list(
                 println!(
                     "  {} ({} files, {}, {})",
                     snap.name,
-                    snap.manifest.file_count,
-                    format_size(snap.manifest.total_size),
+                    snap.file_count,
+                    format_size(snap.total_size),
                     display_time,
                 );
             }

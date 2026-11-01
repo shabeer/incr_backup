@@ -398,7 +398,7 @@ fn check_manifest_consistency(rclone: &Rclone, remote_base: &str) -> VerifyCheck
         Err(_) => Vec::new(),
     };
 
-    let all_meta = crate::compact::discover_all_snapshots(rclone, remote_base).unwrap_or_default();
+    let all_meta = crate::catalog::load_snapshot_catalog(rclone, remote_base).unwrap_or_default();
     let total_snaps = all_meta.len();
 
     VerifyCheck {

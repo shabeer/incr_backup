@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, FixedOffset, Local, Utc};
 use log::{debug, info, warn};
+use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::config::{Config, SnapshotTimezone};
@@ -214,55 +215,57 @@ pub fn discover_all_snapshots(rclone: &Rclone, remote_base: &str) -> Result<Vec<
         Err(_) => HashSet::new(),
     };
 
-    let mut snapshots = Vec::new();
+    let valid_files: Vec<String> = manifest_files
+        .into_iter()
+        .filter(|f| f.ends_with(".json") && f != "current.json")
+        .collect();
 
-    for file in manifest_files {
-        if !file.ends_with(".json") || file == "current.json" {
-            continue;
-        }
+    let mut snapshots: Vec<SnapshotMeta> = valid_files
+        .par_iter()
+        .filter_map(|file| {
+            let remote_manifest_path = format!("{manifests_dir}{file}");
+            let content = match rclone.cat(&remote_manifest_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    debug!("Failed to read manifest {file}: {e}");
+                    return None;
+                }
+            };
 
-        let remote_manifest_path = format!("{manifests_dir}{file}");
-        let content = match rclone.cat(&remote_manifest_path) {
-            Ok(c) => c,
-            Err(e) => {
-                debug!("Failed to read manifest {file}: {e}");
-                continue;
-            }
-        };
+            let manifest = match Manifest::from_json(&content) {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("Failed to parse manifest {file}: {e}");
+                    return None;
+                }
+            };
 
-        let manifest = match Manifest::from_json(&content) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("Failed to parse manifest {file}: {e}");
-                continue;
-            }
-        };
+            let stem = file.trim_end_matches(".json").to_string();
 
-        let stem = file.trim_end_matches(".json").to_string();
-
-        // Match diff directory
-        let diff_dir = if existing_diff_dirs.contains(&stem) {
-            Some(stem.clone())
-        } else if existing_diff_dirs.contains(&manifest.snapshot_name) {
-            Some(manifest.snapshot_name.clone())
-        } else {
-            // Check for tier prefix (e.g. "hourly.0" matching "hourly.0__2026...")
-            let prefix = format!("{stem}__");
-            existing_diff_dirs.iter().find(|d| d.starts_with(&prefix)).cloned()
-        };
-
-        snapshots.push(SnapshotMeta {
-            name: if manifest.snapshot_name.is_empty() {
-                stem.clone()
+            // Match diff directory
+            let diff_dir = if existing_diff_dirs.contains(&stem) {
+                Some(stem.clone())
+            } else if existing_diff_dirs.contains(&manifest.snapshot_name) {
+                Some(manifest.snapshot_name.clone())
             } else {
-                manifest.snapshot_name.clone()
-            },
-            manifest_name: file,
-            created_at: manifest.created_at,
-            diff_dir,
-            manifest,
-        });
-    }
+                // Check for tier prefix (e.g. "hourly.0" matching "hourly.0__2026...")
+                let prefix = format!("{stem}__");
+                existing_diff_dirs.iter().find(|d| d.starts_with(&prefix)).cloned()
+            };
+
+            Some(SnapshotMeta {
+                name: if manifest.snapshot_name.is_empty() {
+                    stem.clone()
+                } else {
+                    manifest.snapshot_name.clone()
+                },
+                manifest_name: file.clone(),
+                created_at: manifest.created_at,
+                diff_dir,
+                manifest,
+            })
+        })
+        .collect();
 
     // Sort chronologically (oldest first)
     snapshots.sort_by_key(|s| s.created_at);
@@ -750,6 +753,28 @@ fn execute_compact_plan(
             let _ = rclone.delete_file(&old_manifest);
         }
 
+        let mut purged = HashSet::new();
+        purged.insert(single.name.clone());
+        purged.insert(single.manifest_name.clone());
+        let new_summary = crate::catalog::SnapshotSummary {
+            name: plan.name.clone(),
+            manifest_name: format!("{}.json", plan.name),
+            created_at: manifest.created_at,
+            diff_dir: if single.diff_dir.is_some() {
+                Some(plan.name.clone())
+            } else {
+                None
+            },
+            file_count: manifest.file_count,
+            total_size: manifest.total_size,
+        };
+        let _ = crate::catalog::update_catalog_after_compaction(
+            rclone,
+            remote_base,
+            Some(new_summary),
+            &purged,
+        );
+
         return Ok(CompactResult {
             name: plan.name.clone(),
             snapshots_consolidated: 1,
@@ -877,6 +902,31 @@ fn execute_compact_plan(
         let old_manifest = format!("{remote_base}/.meta/manifests/{}", snap.manifest_name);
         let _ = rclone.delete_file(&old_manifest);
     }
+
+    // Update remote catalog
+    let mut purged = HashSet::new();
+    for snap in &plan.snapshots_to_purge {
+        purged.insert(snap.name.clone());
+        purged.insert(snap.manifest_name.clone());
+    }
+    let new_summary = crate::catalog::SnapshotSummary {
+        name: plan.name.clone(),
+        manifest_name: format!("{}.json", plan.name),
+        created_at: manifest.created_at,
+        diff_dir: if !plan.files_to_keep.is_empty() {
+            Some(plan.name.clone())
+        } else {
+            None
+        },
+        file_count: manifest.file_count,
+        total_size: manifest.total_size,
+    };
+    let _ = crate::catalog::update_catalog_after_compaction(
+        rclone,
+        remote_base,
+        Some(new_summary),
+        &purged,
+    );
 
     let total_kept_bytes: u64 = plan.files_to_keep.iter().map(|f| f.size).sum();
     let total_discard_bytes: u64 = plan.files_to_discard.iter().map(|f| f.size).sum();

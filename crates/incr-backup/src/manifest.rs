@@ -45,6 +45,34 @@ pub struct FileEntry {
     pub mtime: String,
 }
 
+/// Precomputed total size and file count summary for a snapshot manifest.
+///
+/// Can be deserialized independently from full manifest JSON to extract snapshot
+/// metadata in high-performance discovery operations without allocating the `files` array.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestHeader {
+    /// Which snapshot this manifest describes.
+    pub snapshot_name: String,
+
+    /// When this manifest was generated (UTC).
+    pub created_at: DateTime<Utc>,
+
+    /// Precomputed total size of all files in bytes.
+    #[serde(default)]
+    pub total_size: u64,
+
+    /// Precomputed file count.
+    #[serde(default)]
+    pub file_count: usize,
+}
+
+impl ManifestHeader {
+    /// Parse manifest header from a JSON string, skipping the `files` list.
+    pub fn from_json(json: &str) -> Result<Self> {
+        serde_json::from_str(json).map_err(IncrError::Json)
+    }
+}
+
 /// A snapshot manifest: the complete listing of files at a point in time.
 ///
 /// Serialized as JSON and stored at `.meta/manifests/<snapshot>.json` on the

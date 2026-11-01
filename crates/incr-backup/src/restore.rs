@@ -120,7 +120,7 @@ pub fn run_restore(config: &Config, rclone: &Rclone, options: &RestoreOptions) -
 
     if let Some(ref dir_name) = target_diff_dir {
         // Check if there are any snapshots strictly preceding the target snapshot
-        let all_snapshots = crate::compact::discover_all_snapshots(rclone, remote_base).unwrap_or_default();
+        let all_snapshots = crate::catalog::load_snapshot_catalog(rclone, remote_base).unwrap_or_default();
         let has_preceding_snapshot = all_snapshots.iter().any(|s| {
             s.name != options.snapshot
                 && s.manifest_name != format!("{}.json", options.snapshot)
@@ -413,9 +413,9 @@ fn get_snapshots_after(
     target_snapshot: &str,
     target_manifest: &Manifest,
 ) -> Result<Vec<SnapshotDiffFiles>> {
-    // Discover all snapshots across remote
+    // Discover all snapshot summaries from remote catalog
     let all_snapshots =
-        crate::compact::discover_all_snapshots(rclone, remote_base).unwrap_or_default();
+        crate::catalog::load_snapshot_catalog(rclone, remote_base).unwrap_or_default();
 
     let mut after_diffs: Vec<(chrono::DateTime<chrono::Utc>, String)> = Vec::new();
 
@@ -423,7 +423,7 @@ fn get_snapshots_after(
         // Skip target itself
         if snap.manifest_name == format!("{target_snapshot}.json")
             || snap.name == target_snapshot
-            || snap.manifest.created_at == target_manifest.created_at
+            || snap.created_at == target_manifest.created_at
         {
             continue;
         }

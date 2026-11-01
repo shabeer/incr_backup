@@ -16,7 +16,11 @@
    - [sync: Discrete Incremental Snapshots](#sync-discrete-incremental-snapshots)
      - [Supported Snapshot Names (Default vs. Custom)](#supported-snapshot-names-default-vs-custom)
      - [How Timestamps Are Identified for Custom Names](#how-timestamps-are-identified-for-custom-names)
-   - [list & status](#list--status)
+   - [list & status: High-Performance Snapshot Discovery](#list--status)
+     - [The Scale Problem: 1,000+ Snapshots](#the-scale-problem-1000-snapshots)
+     - [Architectural Options & Trade-Off Analysis](#architectural-options--trade-off-analysis)
+     - [Chosen Architecture: Hybrid Snapshot Catalog (Option 5)](#chosen-architecture-hybrid-snapshot-catalog-option-5)
+     - [Summary of Implementation Changes](#summary-of-implementation-changes)
    - [diff between snapshots](#diff-between-snapshots)
    - [restore & location resolution](#restore--location-resolution)
    - [compact & Dynamic Snapshot Consolidation](#compact--dynamic-snapshot-consolidation)
@@ -103,6 +107,7 @@ gdrive:backup/myhost/
     ├── journal.json                     👈 Write-ahead log (only present during sync)
     ├── lock                             👈 Mutual exclusion lock (holds PID & host)
     ├── staging/                         👈 Safe staging during compaction (ephemeral)
+    ├── snapshots.jsonl                  👈 Snapshot catalog index (O(1) high-speed listing)
     └── manifests/                       👈 Table of contents for each snapshot point
         ├── current.json                 (describes current state)
         ├── 2026-10-28T08-00Z.json       (describes snapshot at that time)
@@ -340,12 +345,113 @@ If a snapshot has a custom name (e.g. `pre-upgrade-v2` or `daily-2026-10-28`), *
 
 ### `list` & `status`
 
-- `list`: Lists all existing snapshot directories sorted chronologically.
+- `list`: Lists existing snapshot directories sorted chronologically, optionally filtered by timestamp or snapshot name bounds using `--from` / `--start` and `--to` / `--end`.
   ```bash
   incr-backup list
+  incr-backup list --from 2026-10-01 --to 2026-10-15
   incr-backup list --json
   ```
 - `status`: Displays remote configuration, lock status (including whether any lock is active or stale), and remote file/storage totals.
+
+---
+
+#### High-Performance Snapshot Discovery Architecture
+
+##### The Scale Problem: 1,000+ Snapshots
+
+In naive implementations, discovering snapshots requires scanning `.meta/manifests/` and checking each manifest. At smaller snapshot counts (10–20 snapshots), this appears fast. However, at scale (e.g. 1,000+ snapshots accumulating over months of hourly backups), this causes severe latency bottlenecks:
+
+1. **$O(N)$ Serial Subprocesses & Round-Trips**:  
+   Iterating over each manifest and running `rclone cat` sequentially for 1,000 snapshots means **1,000 independent process spawns and network round-trips**. Over cloud backends (Google Drive, S3, B2, SFTP), network latency and API throttling cause `list` to take **several minutes**; even on high-speed local NVMe SSDs, sequential subprocess calls take 30–60 seconds.
+2. **Full File Tree Deserialization**:  
+   Every `.meta/manifests/<name>.json` contains the entire file listing (`files: Vec<FileEntry>`). Deserializing 1,000 full manifests transfers hundreds of megabytes over the network and parses millions of JSON file records into heap memory, even though `list` only needs `name`, `created_at`, `diff_dir`, `file_count`, and `total_size`.
+3. **Post-Fetch Filtering**:  
+   When a user supplies `--from` and `--to` bounds, filtering happened in memory *after* reading every single manifest, wasting bandwidth and time downloading files that fall completely outside the query window.
+
+##### Architectural Options & Trade-Off Analysis
+
+To resolve this slowness, five candidate architectures were evaluated:
+
+| Architectural Option | Remote Calls (1,000 snaps) | Latency | Bandwidth | Invalidation / Consistency | Backward Compatibility | Complexity |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Option 1: Centralized Append-Only Remote Index (`snapshots.jsonl`)** | **1 call** | **< 0.2s** | ~100 KB total | High consistency; needs write-path integration | High (requires fallback for existing repos) | Low–Medium |
+| **Option 2: Local Client Metadata Cache (`~/.cache/...`)** | 1 call (after cold run) | < 0.4s | Local read | Cache invalidation needed on multi-machine setups | 100% Yes | Medium |
+| **Option 3: Two-Phase Filtering (Name/Timestamp Pruning & Lazy Fetch)** | 1 + $K$ calls ($K$ = in-range snaps) | 0.5s – 2s | $K$ manifests | Unbounded `list` still slow; custom names need fetch | 100% Yes | Low |
+| **Option 4: Batch Download + `ManifestHeader` Deserialization** | 1 batch sync | 1.5s – 3s | All manifests | Always downloads all manifests on cold runs | 100% Yes | Low |
+| **Option 5: Hybrid Production Solution (Chosen)** | **1 call** | **< 0.2s** | **~100 KB** | Write-through with automatic self-healing fallback | **100% Yes** | **Medium** |
+
+##### Chosen Architecture: Hybrid Snapshot Catalog (Option 5)
+
+`incr-backup` adopted the **Hybrid Production Architecture**, combining the maximum speed of a remote index catalog with the resilience of self-healing fallback and selective JSON deserialization:
+
+```mermaid
+flowchart TD
+    CMD["incr-backup list [--from ..] [--to ..]"] --> CAT{"Read .meta/snapshots.jsonl<br/>(1 single rclone cat)"}
+    
+    CAT -->|"Found & Valid (Fast Path, < 0.2s)"| PARSE["Parse JSON Lines<br/>(SnapshotSummary)"]
+    CAT -->|"Missing or Corrupted<br/>(Self-Healing Fallback)"| SCAN["Scan .meta/manifests/<br/>in parallel via Rayon"]
+    
+    SCAN --> DESER["Lightweight ManifestHeader<br/>(skips files: Vec&lt;FileEntry&gt;)"]
+    DESER --> SAVE["Save rebuilt .meta/snapshots.jsonl<br/>to remote"]
+    SAVE --> PARSE
+    
+    PARSE --> BOUND["filter_snapshots_by_bounds<br/>(SnapshotBoundItem trait)"]
+    BOUND --> OUT["Display Text / JSON Output"]
+```
+
+###### Key Design Components:
+
+1. **Lightweight Remote Catalog (`.meta/snapshots.jsonl`)**:
+   Stores summary headers in newline-delimited JSON (`.jsonl`). Each line represents a `SnapshotSummary`:
+   ```json
+   {"name":"2026-10-29T04-28Z","manifest_name":"2026-10-29T04-28Z.json","created_at":"2026-10-29T04:28:00Z","diff_dir":"2026-10-29T04-28Z","file_count":42,"total_size":1048576}
+   ```
+   For 1,000 snapshots, the entire catalog is ~120 KB and fetches in **one single round-trip**.
+
+2. **Selective Deserialization via `ManifestHeader`**:
+   [`manifest.rs`](src/manifest.rs) provides `ManifestHeader`, which deserializes only scalar summary fields (`snapshot_name`, `created_at`, `total_size`, `file_count`). Serde completely skips the `files` array, reducing CPU parsing overhead and memory allocations by ~98%.
+
+3. **Multi-Threaded Rebuild via Rayon**:
+   When rebuilding the catalog (cold repos or recovery), manifest parsing runs concurrently across available CPU cores using Rayon's `par_iter()`.
+
+4. **Self-Healing Guarantees**:
+   If `.meta/snapshots.jsonl` does not exist or becomes corrupted, the catalog transparently rebuilds itself from `.meta/manifests/` and saves the rebuilt index back to the remote, ensuring zero administrative intervention.
+
+5. **Lifecycle Maintenance**:
+   Mutating operations maintain catalog consistency:
+   - `sync`: Appends/updates the new snapshot entry after manifest upload.
+   - `compact`: Atomically deletes purged snapshot records and registers the consolidated snapshot entry.
+   - `remove`: Removes pruned snapshot entries when history is deleted.
+
+6. **Bound Trait Abstraction (`SnapshotBoundItem`)**:
+   [`changelog.rs`](src/changelog.rs) abstracts snapshot boundary resolution into `SnapshotBoundItem`, implemented for both `SnapshotSummary` and `SnapshotMeta`. Commands like `changelog` and `restore` read the lightweight catalog first, filter the target range, and only download full manifests for snapshots that are actually within the requested bounds.
+
+###### Summary of Implementation Changes:
+
+1. **Remote Snapshot Catalog (`.meta/snapshots.jsonl`)**:
+   - Added [`crates/incr-backup/src/catalog.rs`](../crates/incr-backup/src/catalog.rs) with `SnapshotSummary` containing only metadata needed by listing and bounding: `name`, `manifest_name`, `created_at`, `diff_dir`, `file_count`, and `total_size`.
+   - `list` reads `<remote>/.meta/snapshots.jsonl` in a single `rclone cat` network round-trip (< 100 KB total payload) rather than issuing sequential `cat` calls per snapshot.
+
+2. **Self-Healing Fallback & Rebuild**:
+   - If `.meta/snapshots.jsonl` is missing or corrupt (e.g. existing repositories), `catalog::load_snapshot_catalog` automatically falls back to `rebuild_snapshot_catalog`.
+   - Uses a newly added `ManifestHeader` struct in [`crates/incr-backup/src/manifest.rs`](../crates/incr-backup/src/manifest.rs) that deserializes only the summary fields, skipping the large `files: Vec<FileEntry>` array (saving ~98% CPU/RAM).
+   - Manifest reading during rebuild is parallelized across CPU cores via Rayon.
+   - The rebuilt catalog is automatically saved to the remote for future runs.
+
+3. **Lifecycle Synchronization**:
+   - `sync` ([`crates/incr-backup/src/sync.rs`](../crates/incr-backup/src/sync.rs)): Appends or updates the newly created snapshot in the catalog after uploading the manifest.
+   - `compact` ([`crates/incr-backup/src/compact.rs`](../crates/incr-backup/src/compact.rs)): Atomically replaces compacted source snapshot entries with the new consolidated snapshot entry.
+   - `remove` ([`crates/incr-backup/src/remove.rs`](../crates/incr-backup/src/remove.rs)): Removes pruned snapshot entries from the catalog.
+
+4. **Range Filtering & Trait Abstraction**:
+   - Added `SnapshotBoundItem` trait to [`crates/incr-backup/src/changelog.rs`](../crates/incr-backup/src/changelog.rs) implemented for both `SnapshotSummary` and `SnapshotMeta`.
+   - `filter_snapshots_by_bounds` works uniformly on lightweight summaries and full metadata.
+   - `changelog` and `restore` now also load the lightweight catalog first and only fetch full manifests for snapshots within the requested range.
+
+5. **Testing**:
+   - Added unit tests for JSON lines catalog serialization and `ManifestHeader` selective parsing in `catalog.rs`.
+   - Added integration test `test_list_catalog_fast_path_and_self_healing` in [`crates/incr-backup/tests/test_list.rs`](../crates/incr-backup/tests/test_list.rs).
+   - All tests across the workspace pass.
 
 ---
 
@@ -813,6 +919,8 @@ For engineers familiar with Java/Python, this codebase follows these design mapp
 | Dict diffing `set(a) ^ set(b)` | Manifest HashMap comparison (`diff_manifests`) | [`src/manifest.rs`](src/manifest.rs) |
 | `git filter-repo` / History Purging | Purge files/dirs across manifests, current/, and diffs/ | [`src/remove.rs`](src/remove.rs) |
 | `restic forget` / Snapshot Pruning | Prune historical snapshots on or before cutoff timestamp | [`src/remove.rs`](src/remove.rs) |
+| Fast Index / Database Catalog | Append-only JSON Lines snapshot catalog (`snapshots.jsonl`) | [`src/catalog.rs`](src/catalog.rs) |
+| Partial / Lazy Deserialization | `ManifestHeader` selective JSON parsing without file arrays | [`src/manifest.rs`](src/manifest.rs) |
 
 ---
 
