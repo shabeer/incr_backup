@@ -11,6 +11,7 @@ use std::process;
 use clap::{Parser, Subcommand};
 use log::{error, info};
 
+use incr_backup::changelog::{format_changelog, run_changelog, ChangelogOptions};
 use incr_backup::config::{CliOverrides, Config, SnapshotTimezone};
 use incr_backup::diff::{DiffOptions, run_diff};
 use incr_backup::error::IncrError;
@@ -162,6 +163,21 @@ enum Commands {
         /// Summary counts/sizes only.
         #[arg(long)]
         stat: bool,
+    },
+
+    /// Show changelog across snapshots with files and directories added, deleted, and updated.
+    Changelog {
+        /// Start of snapshot timestamp range (inclusive: first snapshot on or after this timestamp).
+        #[arg(long = "from", visible_alias = "start")]
+        from: Option<String>,
+
+        /// End of snapshot timestamp range (inclusive: latest snapshot on or before this timestamp).
+        #[arg(long = "to", visible_alias = "end")]
+        to: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Verify backup integrity.
@@ -367,6 +383,10 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
             stat,
         } => {
             cmd_diff(config, &snapshot1, &snapshot2, json, only_added, only_deleted, only_modified, stat)?;
+        }
+
+        Commands::Changelog { from, to, json } => {
+            cmd_changelog(config, from, to, json)?;
         }
 
         Commands::Verify {
@@ -809,6 +829,25 @@ fn cmd_diff(
 
     let output = run_diff(&config, &rclone, &options)?;
     println!("{}", output);
+
+    Ok(())
+}
+
+fn cmd_changelog(
+    config: Config,
+    from: Option<String>,
+    to: Option<String>,
+    json: bool,
+) -> incr_backup::error::Result<()> {
+    let rclone = Rclone::new(&config);
+    let options = ChangelogOptions { from, to, json };
+    let result = run_changelog(&config, &rclone, &options)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print!("{}", format_changelog(&result, config.timezone));
+    }
 
     Ok(())
 }

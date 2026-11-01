@@ -35,6 +35,7 @@ pub mod snapshot;
 pub mod sync;
 pub mod restore;
 pub mod diff;
+pub mod changelog;
 pub mod verify;
 pub mod journal;
 pub mod lock;

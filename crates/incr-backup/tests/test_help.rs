@@ -65,4 +65,17 @@ fn test_diff_help_snapshot_older_newer_statement() {
     );
 }
 
+#[test]
+fn test_changelog_help() {
+    let env = TestEnv::new();
+
+    let assert_changelog = env.command().args(["changelog", "--help"]).assert().success();
+    let stdout_changelog = String::from_utf8(assert_changelog.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout_changelog.contains("Show changelog across snapshots"));
+    assert!(stdout_changelog.contains("--from"));
+    assert!(stdout_changelog.contains("--to"));
+    assert!(stdout_changelog.contains("--json"));
+}
+
 

@@ -96,12 +96,17 @@ incr-backup status
 incr-backup list
 ```
 
-### 4. Diff Snapshots
+### 4. Diff & Changelog Snapshots
 
 ```bash
 # Compare what changed between two snapshots (zero bandwidth)
 incr-backup diff 2026-10-28T08-00Z 2026-10-28T07-00Z
 incr-backup diff snap2 snap1 --stat
+
+# View chronological changelog across all snapshots (or within a range)
+incr-backup changelog
+incr-backup changelog --from 2026-10-28T00:00:00Z --to 2026-10-28T23:59:59Z
+incr-backup changelog --from snap1 --to snap3 --json
 ```
 
 ### 5. Restore Files
@@ -229,8 +234,9 @@ Commands:
   list     List all snapshots (--json)
   status   Show backup status and storage summary
   restore  Restore a snapshot to a local directory (--to, --path, --verify, --overwrite)
-  diff     Show differences between two snapshots (--stat, --json, --only-added, --only-modified)
-  verify   Verify backup integrity (--space, --check-hashes, --deep)
+  diff      Show differences between two snapshots (--stat, --json, --only-added, --only-modified)
+  changelog Show changelog across snapshots (--from, --to, --json)
+  verify    Verify backup integrity (--space, --check-hashes, --deep)
   compact  Consolidate snapshots in a date range into a single snapshot (--from, --to, --name, --summary, --full-list)
   remove   Remove a given directory or file(s) from all snapshots (alias: rm) (--path, --force, --json)
   config   Manage configuration between local file and remote metadata (push, pull, diff)
@@ -278,6 +284,7 @@ Test coverage includes:
 - **`test_sync.rs`**: Full sync pipeline, incremental diff tracking, dry-run mode, status inspection, and timezone arguments (`--timezone local`, `--tz utc`).
 - **`test_restore.rs`**: Current restore, point-in-time restore from diffs, overwrite protection, checksum validation.
 - **`test_diff.rs`**: Added, modified, deleted file diff detection, stat summaries, and JSON serialization.
+- **`test_changelog.rs`**: Chronological snapshot evolution, directory and file delta tracking, range filters (`--from`, `--to`), and JSON output.
 - **`test_locking.rs`**: Mutual exclusion, stale lock detection, and force break overrides.
 - **`test_verify.rs`**: Structural integrity, file counts, sizes, remote checksum verification, and space reports.
 - **`test_remove.rs`**: Single file and directory tree purging across current mirror and all historical diffs, manifest rewrites, dry-run mode, JSON output, and root protection.
