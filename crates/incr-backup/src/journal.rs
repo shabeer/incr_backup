@@ -135,6 +135,23 @@ impl<'a> JournalManager<'a> {
         Ok(())
     }
 
+    /// Create a new init --adopt journal and upload it to the remote.
+    pub fn create_adopt_journal(&self) -> Result<()> {
+        let journal = Journal {
+            operation: "init_adopt".to_string(),
+            snapshot_name: "current".to_string(),
+            started_at: Utc::now(),
+            backup_dir: String::new(),
+            steps: create_init_adopt_steps(),
+        };
+
+        self.inner
+            .save_new_journal(journal)
+            .map_err(IncrError::from)?;
+        log::info!("Journal created for init_adopt operation");
+        Ok(())
+    }
+
     /// Load an existing journal from the remote.
     pub fn load_journal(&self) -> Result<Option<Journal>> {
         self.inner.load_journal().map_err(IncrError::from)
@@ -167,6 +184,27 @@ pub fn create_sync_steps() -> Vec<JournalStep> {
         "upload_manifest",
         "cleanup_journal",
         "release_lock",
+    ];
+
+    step_names
+        .iter()
+        .map(|name| JournalStep {
+            name: name.to_string(),
+            status: StepStatus::Pending,
+            details: None,
+        })
+        .collect()
+}
+
+/// Create the standard set of steps for an init --adopt journal.
+pub fn create_init_adopt_steps() -> Vec<JournalStep> {
+    let step_names = [
+        "move_root_items",
+        "create_structure",
+        "upload_config",
+        "generate_manifest",
+        "upload_manifest",
+        "cleanup_journal",
     ];
 
     step_names
@@ -225,6 +263,21 @@ mod tests {
         assert_eq!(steps.len(), 6);
         assert_eq!(steps[0].name, "acquire_lock");
         assert_eq!(steps[5].name, "release_lock");
+        for step in &steps {
+            assert_eq!(step.status, StepStatus::Pending);
+        }
+    }
+
+    #[test]
+    fn test_create_init_adopt_steps() {
+        let steps = create_init_adopt_steps();
+        assert_eq!(steps.len(), 6);
+        assert_eq!(steps[0].name, "move_root_items");
+        assert_eq!(steps[1].name, "create_structure");
+        assert_eq!(steps[2].name, "upload_config");
+        assert_eq!(steps[3].name, "generate_manifest");
+        assert_eq!(steps[4].name, "upload_manifest");
+        assert_eq!(steps[5].name, "cleanup_journal");
         for step in &steps {
             assert_eq!(step.status, StepStatus::Pending);
         }

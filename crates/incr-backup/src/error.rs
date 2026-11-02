@@ -100,6 +100,17 @@ pub enum IncrError {
     #[error("remote '{remote}' contains existing files but is not an initialized backup namespace (missing required directories).\nHint: To adopt existing files into 'current/', re-run with '--adopt'.")]
     RemoteNotEmptyNeedsAdopt { remote: String },
 
+    /// Remote already has a 'current/' directory without an active in-progress adopt journal.
+    #[error("remote '{remote}' already contains 'current/' without an in-progress adopt journal.\nHint: If this is unmanaged data, please manually rename or delete 'current/' before retrying.")]
+    AdoptCurrentAlreadyExists { remote: String },
+
+    /// Remote files lack precomputed MD5 checksums and --download-to-hash was not passed.
+    #[error("remote '{remote}' has {missing_count} files missing precomputed MD5 hashes.\nTo stream/download files to compute hashes, pass '--download-to-hash'.\nAlternatively, clear the remote and run standard 'init' and 'sync' from local source.")]
+    MissingPrecomputedHashes {
+        remote: String,
+        missing_count: usize,
+    },
+
     /// Source directory does not exist or is not readable.
     #[error("source directory not found: {0}")]
     SourceNotFound(PathBuf),

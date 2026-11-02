@@ -104,11 +104,11 @@ fn test_live_init_adopt_existing() {
         return;
     };
 
-    // Pre-populate a file directly in remote current/
-    let current_path = format!("{}/current/pre_existing.txt", env.remote_str());
+    // Pre-populate a file at remote root
+    let root_path = format!("{}/pre_existing.txt", env.remote_str());
     // Write via stdin
     let mut cmd = std::process::Command::new(&env.rclone_path);
-    cmd.args(["rcat", &current_path]);
+    cmd.args(["rcat", &root_path]);
     for flag in &env.rclone_flags {
         cmd.arg(flag);
     }
@@ -135,6 +135,111 @@ fn test_live_init_adopt_existing() {
         .assert()
         .success()
         .stdout(predicate::str::contains("1 files"));
+}
+
+#[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
+fn test_live_init_adopt_multi_directory_under_10s() {
+    let Some(env) = LiveGdriveTestEnv::new("init_adopt_speed") else {
+        eprintln!("Skipping test_live_init_adopt_multi_directory_under_10s: Google Drive remote unreachable");
+        return;
+    };
+
+    // Pre-populate multi-directory structure in remote root
+    for (dir, file) in [("docs", "doc1.txt"), ("photos", "img1.png"), ("src", "main.rs")] {
+        let path = format!("{}/{}/{}", env.remote_str(), dir, file);
+        let mut cmd = std::process::Command::new(&env.rclone_path);
+        cmd.args(["rcat", &path]);
+        for flag in &env.rclone_flags {
+            cmd.arg(flag);
+        }
+        cmd.stdin(std::process::Stdio::piped());
+        if let Ok(mut child) = cmd.spawn() {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(b"multi-directory file content");
+            }
+            let _ = child.wait();
+        }
+    }
+
+    let start = std::time::Instant::now();
+    env.command()
+        .args(["init", "--adopt"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Successfully adopted 3 files"));
+
+    let duration = start.elapsed();
+    assert!(
+        duration < std::time::Duration::from_secs(10),
+        "Adoption of multi-directory structure must complete under 10s (took {:.1}s)",
+        duration.as_secs_f64()
+    );
+}
+
+#[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
+fn test_live_init_adopt_resume_cleanly() {
+    let Some(env) = LiveGdriveTestEnv::new("init_adopt_resume") else {
+        eprintln!("Skipping test_live_init_adopt_resume_cleanly: Google Drive remote unreachable");
+        return;
+    };
+
+    // Pre-populate a file already in current/
+    let cur_file = format!("{}/current/existing.txt", env.remote_str());
+    let mut cmd = std::process::Command::new(&env.rclone_path);
+    cmd.args(["rcat", &cur_file]);
+    for flag in &env.rclone_flags {
+        cmd.arg(flag);
+    }
+    cmd.stdin(std::process::Stdio::piped());
+    if let Ok(mut child) = cmd.spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(b"existing file in current");
+        }
+        let _ = child.wait();
+    }
+
+    // Stage an incomplete adopt journal on remote
+    let journal = serde_json::json!({
+        "operation": "init_adopt",
+        "snapshot_name": "current",
+        "started_at": chrono::Utc::now().to_rfc3339(),
+        "backup_dir": "",
+        "steps": [
+            { "name": "move_root_items", "status": "Done" },
+            { "name": "create_structure", "status": "Pending" },
+            { "name": "upload_config", "status": "Pending" },
+            { "name": "generate_manifest", "status": "Pending" },
+            { "name": "upload_manifest", "status": "Pending" },
+            { "name": "cleanup_journal", "status": "Pending" }
+        ]
+    });
+    let journal_path = format!("{}/.meta/journal.json", env.remote_str());
+    let mut cmd2 = std::process::Command::new(&env.rclone_path);
+    cmd2.args(["rcat", &journal_path]);
+    for flag in &env.rclone_flags {
+        cmd2.arg(flag);
+    }
+    cmd2.stdin(std::process::Stdio::piped());
+    if let Ok(mut child) = cmd2.spawn() {
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(serde_json::to_string_pretty(&journal).unwrap().as_bytes());
+        }
+        let _ = child.wait();
+    }
+
+    // Run init --adopt which should resume from journal
+    env.command()
+        .args(["init", "--adopt"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Found incomplete adopt journal"))
+        .stdout(predicate::str::contains("Resuming adoption"))
+        .stdout(predicate::str::contains("Successfully adopted 1 files"));
 }
 
 // ─── 4. Baseline Sync with All Corner Cases ─────────────────────────────────

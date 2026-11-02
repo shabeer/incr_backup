@@ -230,6 +230,27 @@ fn test_init_adopt_on_partial_structure_overwrites_config() {
     let _ = std::fs::remove_dir_all(env.remote_path.join("diffs"));
     assert!(!env.remote_path.join("diffs").exists());
 
+    // Stage incomplete adopt journal
+    let journal = serde_json::json!({
+        "operation": "init_adopt",
+        "snapshot_name": "current",
+        "started_at": chrono::Utc::now().to_rfc3339(),
+        "backup_dir": "",
+        "steps": [
+            { "name": "move_root_items", "status": "Pending" },
+            { "name": "create_structure", "status": "Pending" },
+            { "name": "upload_config", "status": "Pending" },
+            { "name": "generate_manifest", "status": "Pending" },
+            { "name": "upload_manifest", "status": "Pending" },
+            { "name": "cleanup_journal", "status": "Pending" }
+        ]
+    });
+    std::fs::write(
+        env.remote_path.join(".meta/journal.json"),
+        serde_json::to_string_pretty(&journal).unwrap(),
+    )
+    .unwrap();
+
     // Add another unmanaged file at remote root
     env.write_remote_file("new_file.txt", b"new content");
 
@@ -395,4 +416,192 @@ path = "{}"
         .assert()
         .failure()
         .stderr(predicate::str::contains("remote path is required"));
+}
+
+#[test]
+fn test_init_adopt_fails_when_current_exists_without_journal() {
+    let env = TestEnv::new();
+    env.write_source_file("source.txt", b"source data");
+    // Pre-create current/ directory without any journal
+    env.write_remote_file("current/unmanaged.txt", b"unmanaged data");
+
+    env.command()
+        .args([
+            "init",
+            "--source",
+            &env.source_str(),
+            "--remote",
+            &env.remote_str(),
+            "--adopt",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "already contains 'current/' without an in-progress adopt journal",
+        ))
+        .stderr(predicate::str::contains(
+            "manually rename or delete 'current/'",
+        ));
+}
+
+#[test]
+fn test_init_adopt_resumes_when_incomplete_journal_present() {
+    let env = TestEnv::new();
+    env.write_source_file("source.txt", b"source data");
+    env.write_remote_file("current/already_moved.txt", b"moved data");
+
+    // Stage incomplete adopt journal where move_root_items was Done, create_structure was Pending
+    let journal = serde_json::json!({
+        "operation": "init_adopt",
+        "snapshot_name": "current",
+        "started_at": chrono::Utc::now().to_rfc3339(),
+        "backup_dir": "",
+        "steps": [
+            { "name": "move_root_items", "status": "Done" },
+            { "name": "create_structure", "status": "Pending" },
+            { "name": "upload_config", "status": "Pending" },
+            { "name": "generate_manifest", "status": "Pending" },
+            { "name": "upload_manifest", "status": "Pending" },
+            { "name": "cleanup_journal", "status": "Pending" }
+        ]
+    });
+    std::fs::create_dir_all(env.remote_path.join(".meta")).unwrap();
+    std::fs::write(
+        env.remote_path.join(".meta/journal.json"),
+        serde_json::to_string_pretty(&journal).unwrap(),
+    )
+    .unwrap();
+
+    env.command()
+        .args([
+            "init",
+            "--source",
+            &env.source_str(),
+            "--remote",
+            &env.remote_str(),
+            "--adopt",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Found incomplete adopt journal"))
+        .stdout(predicate::str::contains("Resuming adoption"))
+        .stdout(predicate::str::contains("Successfully adopted 1 files"));
+
+    // Journal should be cleaned up after successful adoption
+    assert!(!env.remote_path.join(".meta/journal.json").exists());
+    assert!(env.remote_path.join(".meta/manifests/current.json").exists());
+}
+
+#[test]
+fn test_init_adopt_fails_on_missing_hashes_without_flag() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::new();
+    env.write_source_file("source.txt", b"source data");
+    env.write_remote_file("data.txt", b"some content to adopt");
+
+    // Create a mock rclone wrapper that strips md5 from lsjson output
+    let mock_path = env.temp_dir.path().join("mock_rclone.sh");
+    let script = r#"#!/bin/sh
+if [ "$1" = "lsjson" ]; then
+    rclone "$@" | sed 's/"md5"/"other_hash"/g'
+else
+    exec rclone "$@"
+fi
+"#;
+    std::fs::write(&mock_path, script).unwrap();
+    std::fs::set_permissions(&mock_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    env.command()
+        .args([
+            "init",
+            "--source",
+            &env.source_str(),
+            "--remote",
+            &env.remote_str(),
+            "--adopt",
+            "--rclone-path",
+            mock_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing precomputed MD5 hashes"))
+        .stderr(predicate::str::contains("pass '--download-to-hash'"));
+}
+
+#[test]
+fn test_init_adopt_succeeds_with_download_to_hash_flag() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::new();
+    env.write_source_file("source.txt", b"source data");
+    env.write_remote_file("data.txt", b"some content to adopt");
+
+    // Create a mock rclone wrapper that strips md5 from lsjson output
+    let mock_path = env.temp_dir.path().join("mock_rclone_download.sh");
+    let script = r#"#!/bin/sh
+if [ "$1" = "lsjson" ]; then
+    rclone "$@" | sed 's/"md5"/"other_hash"/g'
+else
+    exec rclone "$@"
+fi
+"#;
+    std::fs::write(&mock_path, script).unwrap();
+    std::fs::set_permissions(&mock_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    env.command()
+        .args([
+            "init",
+            "--source",
+            &env.source_str(),
+            "--remote",
+            &env.remote_str(),
+            "--adopt",
+            "--download-to-hash",
+            "--rclone-path",
+            mock_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Successfully adopted 1 files"))
+        .stdout(predicate::str::contains("Initialized"));
+
+    // Verify manifest has non-empty valid 32-character MD5 hash
+    let manifest_str = std::fs::read_to_string(
+        env.remote_path.join(".meta/manifests/current.json"),
+    )
+    .unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_str).unwrap();
+    let md5 = manifest["files"][0]["md5"].as_str().unwrap();
+    assert_eq!(md5.len(), 32);
+}
+
+#[test]
+fn test_init_adopt_uses_dir_move_timing() {
+    let env = TestEnv::new();
+    env.write_source_file("source.txt", b"source data");
+
+    // Setup multiple root directories and root files
+    env.write_remote_file("folder_a/item1.txt", b"content 1");
+    env.write_remote_file("folder_b/item2.txt", b"content 2");
+    env.write_remote_file("root_file.txt", b"content root");
+
+    env.command()
+        .args([
+            "init",
+            "--source",
+            &env.source_str(),
+            "--remote",
+            &env.remote_str(),
+            "--adopt",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[1/5] Inspecting remote status..."))
+        .stdout(predicate::str::contains("[2/5] Adopting root entries into 'current/'..."))
+        .stdout(predicate::str::contains("- Moved 2 directories and 1 files (DirMove)..."))
+        .stdout(predicate::str::contains("[3/5] Creating remote structure and config..."))
+        .stdout(predicate::str::contains("[4/5] Scanning adopted files for manifest (fast-list)..."))
+        .stdout(predicate::str::contains("[5/5] Generating and committing initial manifest..."))
+        .stdout(predicate::str::contains("Successfully adopted 3 files"));
 }

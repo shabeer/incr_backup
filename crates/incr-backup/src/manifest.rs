@@ -181,31 +181,23 @@ impl Manifest {
         Ok(manifest)
     }
 
-    /// Parse rclone's `lsjson` output into a manifest.
-    ///
-    /// rclone lsjson returns JSON like:
-    /// ```json
-    /// [{"Path":"documents/report.pdf","Name":"report.pdf","Size":1048576,
-    ///   "ModTime":"2026-10-27T22:00:00.000000000Z","IsDir":false,
-    ///   "Hashes":{"md5":"a1b2c3d4..."}}]
-    /// ```
-    ///
-    /// We extract only files (not directories) and map to our `FileEntry` format.
-    pub fn from_rclone_lsjson(
+    /// Parse rclone's `lsjson` output into raw entries.
+    pub fn parse_rclone_lsjson(
         json_output: &str,
         snapshot_name: &str,
-        created_at: &DateTime<Utc>,
-    ) -> Result<Self> {
-        // Parse the rclone JSON output into our intermediate struct
-        let entries: Vec<RcloneLsjsonEntry> =
-            serde_json::from_str(json_output).map_err(|e| IncrError::InvalidManifest {
-                path: snapshot_name.to_string(),
-                reason: format!("failed to parse rclone lsjson output: {e}"),
-            })?;
+    ) -> Result<Vec<RcloneLsjsonEntry>> {
+        serde_json::from_str(json_output).map_err(|e| IncrError::InvalidManifest {
+            path: snapshot_name.to_string(),
+            reason: format!("failed to parse rclone lsjson output: {e}"),
+        })
+    }
 
-        // Filter to files only (skip directories) and convert to FileEntry
-        // `iter().filter().map().collect()` is like Python's list comprehension:
-        //   [FileEntry(...) for e in entries if not e.is_dir]
+    /// Construct a manifest from a list of `RcloneLsjsonEntry` records.
+    pub fn from_entries(
+        entries: Vec<RcloneLsjsonEntry>,
+        snapshot_name: &str,
+        created_at: &DateTime<Utc>,
+    ) -> Self {
         let files: Vec<FileEntry> = entries
             .into_iter()
             .filter(|e| !e.is_dir)
@@ -221,32 +213,85 @@ impl Manifest {
             })
             .collect();
 
-        Ok(Self::new(snapshot_name, files, created_at))
+        Self::new(snapshot_name, files, created_at)
+    }
+
+    /// Parse rclone's `lsjson` output with MD5 precomputed hash verification.
+    ///
+    /// If `download_to_hash` is false and any file lacks an MD5 hash, returns
+    /// `IncrError::MissingPrecomputedHashes`.
+    pub fn from_rclone_lsjson_checked(
+        json_output: &str,
+        snapshot_name: &str,
+        created_at: &DateTime<Utc>,
+        download_to_hash: bool,
+        remote: &str,
+    ) -> Result<Self> {
+        let entries = Self::parse_rclone_lsjson(json_output, snapshot_name)?;
+
+        if !download_to_hash {
+            let missing_count = entries
+                .iter()
+                .filter(|e| {
+                    !e.is_dir
+                        && e.hashes
+                            .as_ref()
+                            .and_then(|h| h.md5.as_deref())
+                            .unwrap_or("")
+                            .is_empty()
+                })
+                .count();
+
+            if missing_count > 0 {
+                return Err(IncrError::MissingPrecomputedHashes {
+                    remote: remote.to_string(),
+                    missing_count,
+                });
+            }
+        }
+
+        Ok(Self::from_entries(entries, snapshot_name, created_at))
+    }
+
+    /// Parse rclone's `lsjson` output into a manifest.
+    ///
+    /// rclone lsjson returns JSON like:
+    /// ```json
+    /// [{"Path":"documents/report.pdf","Name":"report.pdf","Size":1048576,
+    ///   "ModTime":"2026-10-27T22:00:00.000000000Z","IsDir":false,
+    ///   "Hashes":{"md5":"a1b2c3d4..."}}]
+    /// ```
+    ///
+    /// We extract only files (not directories) and map to our `FileEntry` format.
+    pub fn from_rclone_lsjson(
+        json_output: &str,
+        snapshot_name: &str,
+        created_at: &DateTime<Utc>,
+    ) -> Result<Self> {
+        let entries = Self::parse_rclone_lsjson(json_output, snapshot_name)?;
+        Ok(Self::from_entries(entries, snapshot_name, created_at))
     }
 }
 
 /// Intermediate struct for deserializing rclone's lsjson output.
-///
-/// rclone uses PascalCase field names, so we use `#[serde(rename_all)]`.
-/// Not public — this is an implementation detail of `from_rclone_lsjson`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
-struct RcloneLsjsonEntry {
-    path: String,
-    #[allow(dead_code)]
-    name: Option<String>,
+pub struct RcloneLsjsonEntry {
+    pub path: String,
     #[serde(default)]
-    size: u64,
-    mod_time: String,
+    pub name: Option<String>,
     #[serde(default)]
-    is_dir: bool,
-    hashes: Option<RcloneHashes>,
+    pub size: u64,
+    pub mod_time: String,
+    #[serde(default)]
+    pub is_dir: bool,
+    pub hashes: Option<RcloneHashes>,
 }
 
 /// Hash values from rclone's lsjson output.
-#[derive(Debug, Deserialize)]
-struct RcloneHashes {
-    md5: Option<String>,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RcloneHashes {
+    pub md5: Option<String>,
 }
 
 // ─── Diff Types ─────────────────────────────────────────────────────────────
@@ -434,6 +479,34 @@ mod tests {
         assert_eq!(m.files[0].md5, "a1b2c3d4e5f6");
         assert_eq!(m.files[1].path, "photos/cat.jpg");
         assert_eq!(m.total_size, 1048576 + 524288);
+    }
+
+    #[test]
+    fn test_from_rclone_lsjson_checked_missing_hashes() {
+        let json = r#"[
+            {"Path":"report.pdf","Name":"report.pdf","Size":100,
+             "ModTime":"2026-10-27T22:00:00.000Z","IsDir":false,
+             "Hashes":{}},
+            {"Path":"photos/cat.jpg","Name":"cat.jpg","Size":200,
+             "ModTime":"2026-10-27T21:00:00.000Z","IsDir":false,
+             "Hashes":{"md5":"deadbeef1234"}}
+        ]"#;
+
+        let now = Utc::now();
+        // Without download_to_hash, should fail
+        let res = Manifest::from_rclone_lsjson_checked(json, "current", &now, false, "remote:backup");
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            IncrError::MissingPrecomputedHashes { remote, missing_count } => {
+                assert_eq!(remote, "remote:backup");
+                assert_eq!(missing_count, 1);
+            }
+            other => panic!("expected MissingPrecomputedHashes, got {:?}", other),
+        }
+
+        // With download_to_hash, should succeed
+        let ok = Manifest::from_rclone_lsjson_checked(json, "current", &now, true, "remote:backup").unwrap();
+        assert_eq!(ok.file_count, 2);
     }
 
     #[test]

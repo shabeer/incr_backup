@@ -12,7 +12,8 @@
 //! We do NOT reimplement any rclone functionality. This module is purely
 //! orchestration: "call rclone with these args and give me the result."
 
-use serde::Deserialize;
+use md5::{Digest, Md5};
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::error::{IncrError, Result};
@@ -108,17 +109,13 @@ impl Rclone {
         self.run_rclone(&args, /* is_mutating */ true)
     }
 
-    /// Run `rclone lsjson [--recursive] [--hash] <remote_path>`.
-    ///
-    /// Returns raw JSON output listing files at the remote path.
-    /// Used to build manifests and check remote state.
-    ///
-    /// Always executes (even in dry-run mode) since it's read-only.
-    pub fn lsjson(&self, remote_path: &str, recursive: bool, with_hash: bool) -> Result<String> {
+    /// Build command arguments for `rclone lsjson`.
+    pub fn lsjson_args(remote_path: &str, recursive: bool, with_hash: bool) -> Vec<String> {
         let mut args = vec!["lsjson".to_string(), remote_path.to_string()];
 
         if recursive {
             args.push("--recursive".to_string());
+            args.push("--fast-list".to_string());
         }
         if with_hash {
             args.push("--hash".to_string());
@@ -126,7 +123,17 @@ impl Rclone {
 
         // `--no-mimetype` to reduce output size (we don't need MIME types)
         args.push("--no-mimetype".to_string());
+        args
+    }
 
+    /// Run `rclone lsjson [--recursive] [--fast-list] [--hash] <remote_path>`.
+    ///
+    /// Returns raw JSON output listing files at the remote path.
+    /// Used to build manifests and check remote state.
+    ///
+    /// Always executes (even in dry-run mode) since it's read-only.
+    pub fn lsjson(&self, remote_path: &str, recursive: bool, with_hash: bool) -> Result<String> {
+        let args = Self::lsjson_args(remote_path, recursive, with_hash);
         self.run_rclone(&args, /* is_mutating */ false)
     }
 
@@ -391,6 +398,60 @@ impl Rclone {
         )
     }
 
+    /// List entries at the root of a remote path (non-recursive).
+    pub fn list_root_entries(&self, remote_path: &str) -> Result<Vec<RemoteRootEntry>> {
+        let json_output = match self.lsjson(remote_path, false, false) {
+            Ok(out) => out,
+            Err(IncrError::RcloneFailed { code, ref stderr, .. })
+                if code == 3 || stderr.to_lowercase().contains("directory not found") =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(e),
+        };
+
+        if json_output.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let entries: Vec<RemoteRootEntry> = serde_json::from_str(&json_output).map_err(|e| {
+            IncrError::InvalidManifest {
+                path: remote_path.to_string(),
+                reason: format!("failed to parse root entries: {e}"),
+            }
+        })?;
+
+        Ok(entries)
+    }
+
+    /// Compute or fetch MD5 hash for a remote file by streaming/downloading if needed.
+    pub fn compute_remote_md5(&self, remote_file_path: &str) -> Result<String> {
+        if let Ok(output) = self.run_rclone(
+            &[
+                "hashsum".to_string(),
+                "md5".to_string(),
+                remote_file_path.to_string(),
+            ],
+            false,
+        ) {
+            for line in output.lines() {
+                let trimmed = line.trim();
+                if let Some((hash, _)) = trimmed.split_once("  ") {
+                    let h = hash.trim();
+                    if !h.is_empty() {
+                        return Ok(h.to_string());
+                    }
+                } else if trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Ok(trimmed.to_string());
+                }
+            }
+        }
+
+        // Fallback: cat content and compute md5
+        let content = self.cat(remote_file_path)?;
+        Ok(format!("{:x}", Md5::digest(content.as_bytes())))
+    }
+
     // ─── Private Helpers ────────────────────────────────────────────────
 
     /// Build and execute an rclone command, capturing output.
@@ -412,6 +473,18 @@ impl Rclone {
             .run(args, is_mutating)
             .map_err(IncrError::from)
     }
+}
+
+/// Entry at the root of a remote from `rclone lsjson`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct RemoteRootEntry {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub is_dir: bool,
 }
 
 /// Entry from `rclone lsjson` output — used internally for parsing.
@@ -510,6 +583,24 @@ mod tests {
         let size: SizeOutput = serde_json::from_str(json).unwrap();
         assert_eq!(size.count, 45231);
         assert_eq!(size.bytes, 214748364800);
+    }
+
+    #[test]
+    fn test_lsjson_args_recursive_includes_fast_list() {
+        let args = Rclone::lsjson_args("remote:path", true, true);
+        assert!(args.contains(&"--recursive".to_string()));
+        assert!(args.contains(&"--fast-list".to_string()));
+        assert!(args.contains(&"--hash".to_string()));
+        assert!(args.contains(&"--no-mimetype".to_string()));
+    }
+
+    #[test]
+    fn test_lsjson_args_non_recursive_omits_fast_list() {
+        let args = Rclone::lsjson_args("remote:path", false, false);
+        assert!(!args.contains(&"--recursive".to_string()));
+        assert!(!args.contains(&"--fast-list".to_string()));
+        assert!(!args.contains(&"--hash".to_string()));
+        assert!(args.contains(&"--no-mimetype".to_string()));
     }
 }
 

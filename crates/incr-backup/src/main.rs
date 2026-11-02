@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use log::{error, info};
@@ -17,6 +18,7 @@ use incr_backup::config::{CliOverrides, Config, SnapshotTimezone};
 use incr_backup::diff::{DiffOptions, run_diff};
 use incr_backup::error::IncrError;
 use incr_backup::gc::{run_gc, GcOptions};
+use incr_backup::journal::{Journal, JournalManager, StepStatus};
 use incr_backup::manifest::{format_size, Manifest};
 use incr_backup::rclone::Rclone;
 use incr_backup::remove::{RemoveOptions, RemoveSnapshotsOptions, run_remove, run_remove_snapshots};
@@ -89,6 +91,10 @@ enum Commands {
         /// Adopt an existing rclone-synced directory.
         #[arg(long)]
         adopt: bool,
+
+        /// Download/stream files to compute missing hashes if not precomputed by remote.
+        #[arg(long)]
+        download_to_hash: bool,
 
         /// Exclude patterns (repeatable).
         #[arg(long)]
@@ -384,9 +390,10 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
             source,
             remote,
             adopt,
+            download_to_hash,
             exclude,
         } => {
-            cmd_init(config, source, remote, adopt, exclude)?;
+            cmd_init(config, source, remote, adopt, download_to_hash, exclude)?;
         }
 
         Commands::Sync {
@@ -505,13 +512,23 @@ fn load_config(cli: &Cli) -> incr_backup::error::Result<Config> {
 
 // ── Command Implementations ─────────────────────────────────────────────────
 
+fn step_is_done(journal: &Journal, step_name: &str) -> bool {
+    journal
+        .steps
+        .iter()
+        .any(|s| s.name == step_name && s.status == StepStatus::Done)
+}
+
 fn cmd_init(
     mut config: Config,
     source: Option<String>,
     remote: Option<String>,
     adopt: bool,
+    download_to_hash: bool,
     exclude: Vec<String>,
 ) -> incr_backup::error::Result<()> {
+    let t_inspect = Instant::now();
+
     if let Some(s) = source {
         config.source_path = s;
     }
@@ -541,34 +558,39 @@ fn cmd_init(
         return Err(IncrError::SourceNotFound(source_path.to_path_buf()));
     }
 
+    let remote_base = config.remote_path.trim_end_matches('/').to_string();
     let rclone = Rclone::new(&config);
 
     // Inspect remote state
-    let root_entries = match rclone.lsf(&config.remote_path) {
-        Ok(entries) => entries,
-        Err(IncrError::RcloneFailed { code, ref stderr, .. })
-            if code == 3 || stderr.to_lowercase().contains("directory not found") =>
-        {
-            Vec::new()
-        }
-        Err(e) => return Err(e),
-    };
+    let root_entries = rclone.list_root_entries(&remote_base)?;
 
-    let has_current = root_entries.iter().any(|e| e.trim_end_matches('/') == "current");
-    let has_meta = root_entries.iter().any(|e| e.trim_end_matches('/') == ".meta");
-    let has_diffs = root_entries.iter().any(|e| e.trim_end_matches('/') == "diffs");
+    let has_current = root_entries
+        .iter()
+        .any(|e| e.path == "current" || e.name == "current");
+    let has_meta = root_entries
+        .iter()
+        .any(|e| e.path == ".meta" || e.name == ".meta");
+    let has_diffs = root_entries
+        .iter()
+        .any(|e| e.path == "diffs" || e.name == "diffs");
     let is_initialized = has_current && has_meta && has_diffs;
 
+    let journal_mgr = JournalManager::new(&rclone, &remote_base);
+    let active_adopt_journal = match journal_mgr.load_journal() {
+        Ok(Some(j)) if j.operation == "init_adopt" => Some(j),
+        _ => None,
+    };
+
     // Scenario 2: Remote is already initialized (NO-OP, ignore --adopt)
-    if is_initialized {
-        println!("[INFO] Remote already initialized at {}; nothing to do.", config.remote_path);
+    if is_initialized && active_adopt_journal.is_none() {
+        println!(
+            "[INFO] Remote already initialized at {}; nothing to do.",
+            config.remote_path
+        );
         let stray_entries: Vec<&str> = root_entries
             .iter()
-            .map(|e| e.as_str())
-            .filter(|e| {
-                let name = e.trim_end_matches('/');
-                name != "current" && name != ".meta" && name != "diffs"
-            })
+            .map(|e| e.path.as_str())
+            .filter(|name| *name != "current" && *name != ".meta" && *name != "diffs")
             .collect();
         if !stray_entries.is_empty() {
             eprintln!(
@@ -580,17 +602,28 @@ fn cmd_init(
         return Ok(());
     }
 
+    // Scenario: 'current/' directory exists without an active incomplete adopt journal
+    if has_current && active_adopt_journal.is_none() {
+        return Err(IncrError::AdoptCurrentAlreadyExists {
+            remote: config.remote_path.clone(),
+        });
+    }
+
     // Scenario 3: Remote is non-empty, missing backup structure, and --adopt was NOT passed
-    if !root_entries.is_empty() && !adopt {
+    if !root_entries.is_empty() && !adopt && active_adopt_journal.is_none() {
         return Err(IncrError::RemoteNotEmptyNeedsAdopt {
             remote: config.remote_path.clone(),
         });
     }
 
-    // Scenario 4 vs Scenario 1:
-    // If remote is not empty and adopt is true -> adopt flow.
-    // If remote is empty -> silently ignore --adopt flag.
-    let is_adopting = !root_entries.is_empty() && adopt;
+    let is_resuming = active_adopt_journal.is_some();
+    let is_adopting = is_resuming || (!root_entries.is_empty() && adopt);
+
+    if let Some(ref j) = active_adopt_journal {
+        let ts = config.timezone.format_message_datetime(j.started_at);
+        println!("[INFO] Found incomplete adopt journal from {ts}. Resuming adoption...");
+    }
+
     if is_adopting {
         println!("[WARN] Adopting existing remote contents into 'current/'...");
     }
@@ -604,55 +637,258 @@ fn cmd_init(
         return Ok(());
     }
 
-    // Create current/
-    rclone.mkdir(&format!("{}/current/", config.remote_path))?;
+    let total_start = Instant::now();
+    println!(
+        "[1/5] Inspecting remote status... ({:.1}s)",
+        t_inspect.elapsed().as_secs_f64()
+    );
 
     if is_adopting {
-        // Move existing files to current/
-        println!("Adopting existing files (server-side move, zero bandwidth)...");
-        let move_excludes = vec![
-            "current/**".to_string(),
-            "diffs/**".to_string(),
-            ".meta/**".to_string(),
-        ];
-        rclone.move_dir(
-            &config.remote_path,
-            &format!("{}/current/", config.remote_path),
-            &move_excludes,
-            true,
-        )?;
-    }
+        if !is_resuming {
+            // Write WAL journal before moving root items
+            journal_mgr.create_adopt_journal()?;
+            // Create current/
+            rclone.mkdir(&format!("{remote_base}/current/"))?;
+        }
 
-    // Create remaining directory structure
-    println!("Creating remote directory structure...");
-    rclone.mkdir(&format!("{}/diffs/", config.remote_path))?;
-    rclone.mkdir(&format!("{}/.meta/", config.remote_path))?;
-    rclone.mkdir(&format!("{}/.meta/manifests/", config.remote_path))?;
+        // [2/5] Move root entries into current/ (DirMove)
+        let t_step2 = Instant::now();
+        println!("[2/5] Adopting root entries into 'current/'...");
 
-    // Upload config (overwriting if already present)
-    let meta_path = format!("{}/.meta/config.json", config.remote_path);
-    let remote_config = config.to_remote_config();
-    let config_json = remote_config.to_json()?;
-    rclone.rcat(&meta_path, &config_json)?;
+        let move_done = active_adopt_journal
+            .as_ref()
+            .map(|j| step_is_done(j, "move_root_items"))
+            .unwrap_or(false);
 
-    // Generate initial manifest by scanning current/
-    println!("Scanning remote for initial manifest...");
-    let current_path = format!("{}/current/", config.remote_path);
-    let lsjson = rclone.lsjson_recursive_hash(&current_path)?;
-    let now = chrono::Utc::now();
-    let manifest = Manifest::from_rclone_lsjson(&lsjson, "current", &now)?;
-    let manifest_json = manifest.to_json()?;
-    rclone.rcat(
-        &format!("{}/.meta/manifests/current.json", config.remote_path),
-        &manifest_json,
-    )?;
+        if !move_done {
+            journal_mgr.update_step("move_root_items", StepStatus::Running)?;
+            println!("      Adopting existing files (server-side move, zero bandwidth)...");
 
-    if is_adopting {
+            let current_root = rclone.list_root_entries(&remote_base)?;
+            let mut moved_dirs = 0;
+            let mut moved_files = 0;
+
+            for item in &current_root {
+                let name = item.path.trim_end_matches('/');
+                if name == "current" || name == ".meta" || name == "diffs" {
+                    continue;
+                }
+                let src = format!("{remote_base}/{name}");
+                let dst = format!("{remote_base}/current/{name}");
+                if item.is_dir {
+                    rclone.move_dir(&src, &dst, &[], true)?;
+                    moved_dirs += 1;
+                } else {
+                    rclone.moveto(&src, &dst)?;
+                    moved_files += 1;
+                }
+            }
+
+            journal_mgr.update_step("move_root_items", StepStatus::Done)?;
+            println!(
+                "      - Moved {} directories and {} files (DirMove)... ({:.1}s)",
+                moved_dirs,
+                moved_files,
+                t_step2.elapsed().as_secs_f64()
+            );
+        } else {
+            println!(
+                "      - Root entries already moved in previous run ({:.1}s)",
+                t_step2.elapsed().as_secs_f64()
+            );
+        }
+
+        // [3/5] Create remote structure and config
+        let t_step3 = Instant::now();
+        let create_struct_done = active_adopt_journal
+            .as_ref()
+            .map(|j| step_is_done(j, "create_structure"))
+            .unwrap_or(false);
+
+        if !create_struct_done {
+            journal_mgr.update_step("create_structure", StepStatus::Running)?;
+            rclone.mkdir(&format!("{remote_base}/diffs/"))?;
+            rclone.mkdir(&format!("{remote_base}/.meta/"))?;
+            rclone.mkdir(&format!("{remote_base}/.meta/manifests/"))?;
+            journal_mgr.update_step("create_structure", StepStatus::Done)?;
+        }
+
+        let upload_config_done = active_adopt_journal
+            .as_ref()
+            .map(|j| step_is_done(j, "upload_config"))
+            .unwrap_or(false);
+
+        if !upload_config_done {
+            journal_mgr.update_step("upload_config", StepStatus::Running)?;
+            let meta_path = format!("{remote_base}/.meta/config.json");
+            let remote_config = config.to_remote_config();
+            let config_json = remote_config.to_json()?;
+            rclone.rcat(&meta_path, &config_json)?;
+            journal_mgr.update_step("upload_config", StepStatus::Done)?;
+        }
+        println!(
+            "[3/5] Creating remote structure and config... ({:.1}s)",
+            t_step3.elapsed().as_secs_f64()
+        );
+
+        // [4/5] Scan adopted files for manifest (fast-list)
+        let t_step4 = Instant::now();
+        println!("[4/5] Scanning adopted files for manifest (fast-list)...");
+
+        let gen_manifest_done = active_adopt_journal
+            .as_ref()
+            .map(|j| step_is_done(j, "generate_manifest"))
+            .unwrap_or(false);
+
+        if !gen_manifest_done {
+            journal_mgr.update_step("generate_manifest", StepStatus::Running)?;
+        }
+
+        let current_path = format!("{remote_base}/current/");
+        let lsjson = rclone.lsjson_recursive_hash(&current_path)?;
+        let mut entries = Manifest::parse_rclone_lsjson(&lsjson, "current")?;
+
+        let missing_count = entries
+            .iter()
+            .filter(|e| {
+                !e.is_dir
+                    && e.hashes
+                        .as_ref()
+                        .and_then(|h| h.md5.as_deref())
+                        .unwrap_or("")
+                        .is_empty()
+            })
+            .count();
+
+        if missing_count > 0 {
+            if !download_to_hash {
+                return Err(IncrError::MissingPrecomputedHashes {
+                    remote: config.remote_path.clone(),
+                    missing_count,
+                });
+            }
+
+            println!(
+                "      Downloading/streaming {missing_count} files to compute MD5 hashes..."
+            );
+            for e in &mut entries {
+                if !e.is_dir {
+                    let has_md5 = e
+                        .hashes
+                        .as_ref()
+                        .and_then(|h| h.md5.as_deref())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false);
+                    if !has_md5 {
+                        let remote_file = format!("{remote_base}/current/{}", e.path);
+                        let computed_md5 = rclone.compute_remote_md5(&remote_file)?;
+                        e.hashes = Some(incr_backup::manifest::RcloneHashes {
+                            md5: Some(computed_md5),
+                        });
+                    }
+                }
+            }
+        }
+
+        let now = chrono::Utc::now();
+        let manifest = Manifest::from_entries(entries, "current", &now);
+
+        if !gen_manifest_done {
+            journal_mgr.update_step("generate_manifest", StepStatus::Done)?;
+        }
+        println!(
+            "      - Scanned {} files ({:.1}s)",
+            manifest.file_count,
+            t_step4.elapsed().as_secs_f64()
+        );
+
+        // [5/5] Generating and committing initial manifest
+        let t_step5 = Instant::now();
+        let upload_manifest_done = active_adopt_journal
+            .as_ref()
+            .map(|j| step_is_done(j, "upload_manifest"))
+            .unwrap_or(false);
+
+        if !upload_manifest_done {
+            journal_mgr.update_step("upload_manifest", StepStatus::Running)?;
+            let manifest_json = manifest.to_json()?;
+            rclone.rcat(
+                &format!("{remote_base}/.meta/manifests/current.json"),
+                &manifest_json,
+            )?;
+            journal_mgr.update_step("upload_manifest", StepStatus::Done)?;
+        }
+        println!(
+            "[5/5] Generating and committing initial manifest... ({:.1}s)",
+            t_step5.elapsed().as_secs_f64()
+        );
+
+        // Cleanup journal
+        journal_mgr.cleanup()?;
+
         println!("✓ Adopted {} files into current/", manifest.file_count);
+        println!(
+            "✓ Successfully adopted {} files ({}) in {:.1}s.",
+            manifest.file_count,
+            format_size(manifest.total_size),
+            total_start.elapsed().as_secs_f64()
+        );
+        println!("✓ Initialized {}", config.remote_path);
+        println!(
+            "  {} files indexed ({})",
+            manifest.file_count,
+            format_size(manifest.total_size)
+        );
+        println!("  Ready for incremental backups.");
+    } else {
+        println!("[2/5] Skipping adoption (empty remote) (0.0s)");
+
+        let t_step3 = Instant::now();
+        println!("Creating remote directory structure...");
+        rclone.mkdir(&format!("{remote_base}/current/"))?;
+        rclone.mkdir(&format!("{remote_base}/diffs/"))?;
+        rclone.mkdir(&format!("{remote_base}/.meta/"))?;
+        rclone.mkdir(&format!("{remote_base}/.meta/manifests/"))?;
+
+        let meta_path = format!("{remote_base}/.meta/config.json");
+        let remote_config = config.to_remote_config();
+        let config_json = remote_config.to_json()?;
+        rclone.rcat(&meta_path, &config_json)?;
+        println!(
+            "[3/5] Creating remote structure and config... ({:.1}s)",
+            t_step3.elapsed().as_secs_f64()
+        );
+
+        let t_step4 = Instant::now();
+        println!("Scanning remote for initial manifest...");
+        let current_path = format!("{remote_base}/current/");
+        let lsjson = rclone.lsjson_recursive_hash(&current_path)?;
+        let now = chrono::Utc::now();
+        let manifest = Manifest::from_rclone_lsjson(&lsjson, "current", &now)?;
+        println!(
+            "[4/5] Scanning remote for initial manifest... ({:.1}s)",
+            t_step4.elapsed().as_secs_f64()
+        );
+
+        let t_step5 = Instant::now();
+        let manifest_json = manifest.to_json()?;
+        rclone.rcat(
+            &format!("{remote_base}/.meta/manifests/current.json"),
+            &manifest_json,
+        )?;
+        println!(
+            "[5/5] Generating and committing initial manifest... ({:.1}s)",
+            t_step5.elapsed().as_secs_f64()
+        );
+
+        println!("✓ Initialized {}", config.remote_path);
+        println!(
+            "  {} files indexed ({})",
+            manifest.file_count,
+            format_size(manifest.total_size)
+        );
+        println!("  Ready for incremental backups.");
     }
-    println!("✓ Initialized {}", config.remote_path);
-    println!("  {} files indexed ({})", manifest.file_count, format_size(manifest.total_size));
-    println!("  Ready for incremental backups.");
 
     Ok(())
 }
