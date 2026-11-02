@@ -1473,7 +1473,7 @@
 | **Test Name**    | Purge entire directory and nested subdirectories from all snapshots |
 | **Preconditions** | Backup containing `sensitive/passwords.txt`, `sensitive/sub/key.pem`, and `docs/report.txt`. |
 | **Steps**        | 1. Run `incr-backup remove sensitive/` |
-| **Expected Result** | - Exit code 0. <br>- `sensitive/` directory is purged from `current/`. <br>- `sensitive/` is purged from all `diffs/*` snapshot directories. <br>- Empty directory structures cleaned up via `rclone rmdirs --leave-root`. <br>- Manifests have zero entries under `sensitive/`. <br>- `docs/report.txt` is intact. |
+| **Expected Result** | - Exit code 0. <br>- `sensitive/` directory is purged from `current/`. <br>- `sensitive/` is purged from all `diffs/*` snapshot directories. <br>- Target subdirectory cleaned up via targeted `rclone rmdirs`. <br>- Manifests have zero entries under `sensitive/`. <br>- `docs/report.txt` is intact. |
 | **Category**     | e2e |
 
 ---

@@ -172,24 +172,6 @@ impl Rclone {
         )
     }
 
-    /// Run `rclone delete <remote_path> --rmdirs` followed by `rclone rmdirs <remote_path>`.
-    ///
-    /// Deletes all files under `remote_path` using `rclone delete --rmdirs` instead of `rclone purge`,
-    /// then removes empty directory structures.
-    /// Idempotent — non-existent directory errors are handled gracefully.
-    pub fn delete_dir(&self, remote_path: &str) -> Result<String> {
-        let res = self.delete(remote_path, &[]);
-        let _ = self.rmdirs(remote_path, false);
-        res
-    }
-
-    /// Run `rclone delete <remote_path> --rmdirs` followed by `rclone rmdirs <remote_path>`.
-    ///
-    /// Deprecated in favor of `delete_dir` or `delete`: uses `rclone delete --rmdirs` instead of `rclone purge`.
-    pub fn purge(&self, remote_path: &str) -> Result<String> {
-        self.delete_dir(remote_path)
-    }
-
     /// Run `rclone mkdir <remote_path>`.
     ///
     /// Creates a directory on the remote. Idempotent — creating an existing
@@ -200,20 +182,19 @@ impl Rclone {
 
     /// Run `rclone deletefile <remote_path>`.
     ///
-    /// Deletes a single file from the remote. Used for lock file cleanup.
+    /// Deletes a single file from the remote. Used for lock, journal, and manifest cleanup.
     pub fn delete_file(&self, remote_path: &str) -> Result<String> {
         self.run_rclone(&["deletefile".to_string(), remote_path.to_string()], true)
     }
 
-    /// Run `rclone delete <remote_path> --rmdirs [--include <pattern>...]`.
+    /// Run `rclone delete <remote_path> [--include <pattern>...]`.
     ///
+    /// Pure file-level deletion without `--rmdirs`, safe under restricted `drive.file` scope.
     /// Deletes files in `remote_path` matching include patterns (or all files if empty).
-    /// Uses `--rmdirs` along with `rclone delete` to remove empty directory structures.
     pub fn delete(&self, remote_path: &str, includes: &[String]) -> Result<String> {
         let mut args = vec![
             "delete".to_string(),
             remote_path.to_string(),
-            "--rmdirs".to_string(),
         ];
         for inc in includes {
             args.push("--include".to_string());
@@ -222,15 +203,12 @@ impl Rclone {
         self.run_rclone(&args, /* is_mutating */ true)
     }
 
-    /// Run `rclone rmdirs <remote_path> [--leave-root]`.
+    /// Run `rclone rmdirs <remote_dir>`.
     ///
-    /// Removes empty directories in `remote_path`.
-    pub fn rmdirs(&self, remote_path: &str, leave_root: bool) -> Result<String> {
-        let mut args = vec!["rmdirs".to_string(), remote_path.to_string()];
-        if leave_root {
-            args.push("--leave-root".to_string());
-        }
-        self.run_rclone(&args, /* is_mutating */ true)
+    /// Removes an empty specific directory (e.g. `remote:diffs/TIMESTAMP` or `.meta/staging/TIMESTAMP`).
+    /// Targeted strictly at the specific directory, never at parent containers like `diffs/` or `current/`.
+    pub fn rmdir_specific(&self, remote_dir: &str) -> Result<String> {
+        self.run_rclone(&["rmdirs".to_string(), remote_dir.to_string()], true)
     }
 
     /// Run `rclone cat <remote_path>` — read a remote file's contents.
@@ -519,18 +497,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dry_run_delete_dir_returns_ok() {
+    fn test_dry_run_rmdir_specific_returns_ok() {
         let config = test_config();
         let rclone = Rclone::new(&config);
-        let result = rclone.delete_dir("remote:dest");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_dry_run_rmdirs_returns_ok() {
-        let config = test_config();
-        let rclone = Rclone::new(&config);
-        let result = rclone.rmdirs("remote:dest", true);
+        let result = rclone.rmdir_specific("remote:diffs/2026-11-02T08-00Z");
         assert!(result.is_ok());
     }
 

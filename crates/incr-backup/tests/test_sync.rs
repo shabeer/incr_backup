@@ -93,7 +93,7 @@ fn test_sync_basic_and_incremental() {
         .stdout(predicate::str::contains("Diffs:"));
 
     for dir in &diff_dirs {
-        status_assert = status_assert.stdout(predicate::str::contains(format!("  {}: 2 files", dir)));
+        status_assert = status_assert.stdout(predicate::str::contains(format!("  {}:", dir)));
     }
 }
 

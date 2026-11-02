@@ -798,7 +798,8 @@ fn execute_compact_plan(
     let final_diff_dir = format!("{remote_base}/diffs/{}", plan.name);
 
     // Clean up any existing staging from aborted previous runs
-    let _ = rclone.delete_dir(&staging_dir);
+    let _ = rclone.delete(&staging_dir, &[]);
+    let _ = rclone.rmdir_specific(&staging_dir);
     let _ = rclone.delete_file(&staging_manifest);
 
     info!(
@@ -828,7 +829,8 @@ fn execute_compact_plan(
     let staged_json = rclone.cat(&staging_manifest)?;
     let parsed_manifest = Manifest::from_json(&staged_json)?;
     if parsed_manifest.files.len() != plan.anchor_snapshot.manifest.files.len() {
-        let _ = rclone.delete_dir(&staging_dir);
+        let _ = rclone.delete(&staging_dir, &[]);
+        let _ = rclone.rmdir_specific(&staging_dir);
         let _ = rclone.delete_file(&staging_manifest);
         return Err(IncrError::CompactionError(
             "Staged manifest validation failed: file count mismatch".to_string(),
@@ -861,7 +863,8 @@ fn execute_compact_plan(
             match staged_map.get(&file.path) {
                 Some(staged_md5) => {
                     if !file.md5.is_empty() && !staged_md5.is_empty() && file.md5 != *staged_md5 {
-                        let _ = rclone.delete_dir(&staging_dir);
+                        let _ = rclone.delete(&staging_dir, &[]);
+                        let _ = rclone.rmdir_specific(&staging_dir);
                         let _ = rclone.delete_file(&staging_manifest);
                         return Err(IncrError::CompactionError(format!(
                             "Hash verification failed for staged file '{}'",
@@ -870,7 +873,8 @@ fn execute_compact_plan(
                     }
                 }
                 None => {
-                    let _ = rclone.delete_dir(&staging_dir);
+                    let _ = rclone.delete(&staging_dir, &[]);
+                    let _ = rclone.rmdir_specific(&staging_dir);
                     let _ = rclone.delete_file(&staging_manifest);
                     return Err(IncrError::CompactionError(format!(
                         "Verification failed: file '{}' missing from staging directory",
@@ -889,20 +893,29 @@ fn execute_compact_plan(
         // Move staging directory to final diffs/<name>
         rclone.moveto(&staging_dir.trim_end_matches('/'), &final_diff_dir)?;
     } else {
-        let _ = rclone.delete_dir(&staging_dir);
+        let _ = rclone.delete(&staging_dir, &[]);
+        let _ = rclone.rmdir_specific(&staging_dir);
+        // Ensure 1:1 correspondence: create empty diff directory for the consolidated snapshot
+        let _ = rclone.mkdir(&final_diff_dir);
     }
 
     // Consolidated snapshot is now fully active!
 
-    // Step 4: Purge source snapshots and their manifests
+    // Step 4: Delete source snapshots and their manifests
     info!(
-        "Stage 4: Purging {} source snapshots...",
+        "Stage 4: Deleting {} source snapshots...",
         plan.snapshots_to_purge.len()
     );
     for snap in &plan.snapshots_to_purge {
         if let Some(ref dir) = snap.diff_dir {
             let old_diff = format!("{remote_base}/diffs/{dir}");
-            let _ = rclone.delete_dir(&old_diff);
+            let _ = rclone.delete(&old_diff, &[]);
+            if let Err(e) = rclone.rmdir_specific(&old_diff) {
+                warn!(
+                    "[WARN] Could not remove empty diff directory '{}' ({e}). Please manually remove it if needed: rclone rmdirs \"{}\"",
+                    old_diff, old_diff
+                );
+            }
         }
         let old_manifest = format!("{remote_base}/.meta/manifests/{}", snap.manifest_name);
         let _ = rclone.delete_file(&old_manifest);
@@ -918,11 +931,7 @@ fn execute_compact_plan(
         name: plan.name.clone(),
         manifest_name: format!("{}.json", plan.name),
         created_at: manifest.created_at,
-        diff_dir: if !plan.files_to_keep.is_empty() {
-            Some(plan.name.clone())
-        } else {
-            None
-        },
+        diff_dir: Some(plan.name.clone()),
         file_count: manifest.file_count,
         total_size: manifest.total_size,
     };

@@ -283,10 +283,10 @@ impl LiveGdriveTestEnv {
         cmd.output().expect("failed to execute rclone")
     }
 
-    /// Clean up remote test directory from Google Drive using delete --rmdirs and rmdirs.
+    /// Clean up remote test directory from Google Drive using targeted delete and rmdirs.
     pub fn cleanup(&self) {
         if !self.keep_remote {
-            let _ = self.rclone_exec(&["delete", &self.test_remote, "--rmdirs"]);
+            let _ = self.rclone_exec(&["delete", &self.test_remote]);
             let _ = self.rclone_exec(&["rmdirs", &self.test_remote]);
         }
     }

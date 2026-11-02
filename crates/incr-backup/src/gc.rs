@@ -263,13 +263,17 @@ fn run_gc_inner(config: &Config, rclone: &Rclone, options: &GcOptions) -> Result
     // 8. Delete orphaned diff directories on remote
     for item in &orphaned_info {
         let diff_path = format!("{remote_clean}/diffs/{}", item.dir_name);
-        info!("Deleting orphaned diff directory {}", diff_path);
+        info!("Deleting files in orphaned diff directory {}", diff_path);
         if let Err(e) = rclone.delete(&diff_path, &[]) {
-            warn!("Failed to delete orphaned diff directory {}: {}", diff_path, e);
+            warn!("Failed to delete files in orphaned diff directory {}: {}", diff_path, e);
         }
-        let _ = rclone.rmdirs(&diff_path, false);
+        if let Err(e) = rclone.rmdir_specific(&diff_path) {
+            warn!(
+                "[WARN] Could not remove empty diff directory '{}' ({e}). Please manually remove it if needed: rclone rmdirs \"{}\"",
+                diff_path, diff_path
+            );
+        }
     }
-    let _ = rclone.rmdirs(&format!("{remote_clean}/diffs/"), true);
 
     // 9. Update remote snapshot catalog to clear purged diff directories and remove stale entries
     let purged_diff_set: HashSet<String> = orphaned_info.iter().map(|i| i.dir_name.clone()).collect();

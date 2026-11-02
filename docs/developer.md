@@ -634,8 +634,8 @@ flowchart TD
     C --> D["Filter Out Matching Entries<br/>Recompute file_count & total_size"]
     D --> E["Upload Updated Manifests via rclone rcat"]
     E --> F["Delete from current/ via rclone delete"]
-    F --> G["Delete from all diffs/*/ directories"]
-    G --> H["Clean Empty Subdirs (rclone rmdirs --leave-root)"]
+    F --> G["Delete from all diffs/*/ directories via rclone delete"]
+    G --> H["Clean Specific Target Subdirs (if directory target)"]
     H --> I["Release Remote Lock"]
 ```
 
@@ -646,8 +646,8 @@ flowchart TD
    - Recalculates `file_count` and `total_size`.
    - Re-uploads updated manifests.
 3. **Storage Purging**:
-   - Executes `rclone delete` with include filters across `current/` and all snapshot directories under `diffs/`.
-   - Runs `rclone rmdirs --leave-root` to clean up any empty directory structures left behind.
+   - Executes pure file-level `rclone delete` with include filters across `current/` and all snapshot directories under `diffs/`.
+   - Never runs broad `rmdirs --leave-root` across parent containers. If removing an entire named directory target (e.g. `sensitive/`), specifically attempts `rclone rmdirs` on that target subdirectory.
 4. **Zero Residue & Verification Integrity**:
    - Because both manifests and storage are updated consistently, running `incr-backup verify` immediately afterwards passes all 12 integrity checks.
 
@@ -698,10 +698,10 @@ flowchart TD
     D --> E["Identify Diff Dirs to Purge:<br/>• All diffs/<dir> from to_remove<br/>• diffs/<dir> of first survivor S_first_after (orphaned history)"]
     E --> F{"Is Dry Run (-n)?"}
     F -->|Yes| G["Log Summary & Return Plan (0 mutations)"]
-    F -->|No| H["Delete Remote Diff Directories (rclone delete --rmdirs)"]
-    H --> I["Delete Manifests of Removed Snapshots (rclone deletefile)"]
-    I --> J["Update Snapshot Catalog (.meta/snapshots.jsonl):<br/>• Remove deleted snapshots<br/>• Set diff_dir = None for S_first_after (clean baseline)"]
-    J --> K["Clean Empty Dirs (rclone rmdirs --leave-root)"]
+    F -->|No| H["Delete Diff Files (rclone delete diffs/TIMESTAMP)"]
+    H --> I["Remove Specific Diff Dir (rclone rmdirs diffs/TIMESTAMP)<br/>(Highlight for manual removal if rmdir fails)"]
+    I --> J["Delete Manifests of Removed Snapshots (rclone deletefile)"]
+    J --> K["Update Snapshot Catalog (.meta/snapshots.jsonl):<br/>• Remove deleted snapshots<br/>• Set diff_dir = None for S_first_after (clean baseline)"]
     K --> L["Release Advisory Lock"]
     G --> L
 ```
@@ -713,9 +713,9 @@ flowchart TD
 3. **Diff Directories Determination**:
    - Gathers all diff directories associated with `to_remove`.
    - If at least one snapshot is deleted and surviving snapshots exist, it **also purges the diff directory of the first surviving snapshot ($S_{first\_after}$)**.
-4. **Purge & Commit**:
+4. **Targeted Delete & Directory Pruning**:
    - If `--dry-run` (`-n`) is active, logs all snapshots and diff directories that would be purged and exits without modifying remote storage.
-   - Otherwise, executes `rclone delete --rmdirs` for the target diff directories, deletes the corresponding JSON manifests from `.meta/manifests/`, and cleans up empty subdirectories via `rclone rmdirs`.
+   - Otherwise, executes `rclone delete` to remove files inside each target diff directory, attempts `rclone rmdirs remote:diffs/TIMESTAMP` specifically on that snapshot directory (highlighting for manual removal if it fails), and deletes the corresponding JSON manifests from `.meta/manifests/`. Never runs `rmdirs --leave-root` across parent `diffs/`.
 5. **Snapshot Catalog Synchronization (`.meta/snapshots.jsonl`)**:
    - Immediately after deleting manifests, `remove_snapshots` calls `crate::catalog::remove_from_catalog(rclone, remote_base, &names_to_remove, &purged_diff_set)`.
    - **Removes Pruned Records**: Drops all deleted snapshots from the catalog index.
@@ -838,7 +838,7 @@ The `gc` command provides dedicated garbage collection for remote storage. Over 
 #### Architecture & Safety Rules:
 1. **Authoritative Manifests**: Snapshot manifests in `.meta/manifests/*.json` serve as the single source of truth for active snapshots.
 2. **Multi-Strategy Active Matching**: A diff directory is marked active (and retained) if it matches an active manifest's stem, `snapshot_name`, prefix (`stem__`), explicit `diff_dir` in `.meta/snapshots.jsonl`, or `restore::find_snapshot_diff_dir`.
-3. **Orphan Identification & Pruning**: Any directory under `diffs/` without a corresponding active manifest is considered orphaned and deleted via `rclone.delete` (with `--rmdirs`).
+3. **Orphan Identification & Pruning**: Any directory under `diffs/` without a corresponding active manifest is considered orphaned. Its files are deleted via `rclone.delete` and the specific directory is removed via `rclone rmdirs remote:diffs/TIMESTAMP` (highlighting for manual removal if rmdir fails). It never touches parent `diffs/` or active snapshots' empty diff directories.
 4. **Catalog Self-Healing**: After purging orphaned diffs, any stale entries in `.meta/snapshots.jsonl` are automatically cleaned up.
 5. **Dry-Run & JSON Support**: Fully supports `-n / --dry-run` to preview file counts and byte sizes that would be freed, as well as `--json` for automation.
 

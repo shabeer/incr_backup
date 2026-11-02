@@ -381,20 +381,24 @@ fn run_remove_inner(
         }
     }
 
-    // 4a. Delete from current/
+    // 4a. Delete matching files from current/ (file-level deletion, no rmdirs on current/)
     let current_dir = format!("{remote_base}/current");
     debug!("Purging matching files from {}", current_dir);
     rclone.delete(&current_dir, &includes)?;
-    let _ = rclone.rmdirs(&current_dir, true);
+    for t in norm_targets {
+        let _ = rclone.rmdir_specific(&format!("{current_dir}/{t}"));
+    }
 
-    // 4b. Delete from all diffs/*/ directories
+    // 4b. Delete matching files from all diffs/*/ directories (file-level deletion)
     let diffs_base = format!("{remote_base}/diffs/");
     if let Ok(diff_dirs) = rclone.lsd(&diffs_base) {
         for diff_dir in diff_dirs {
             let diff_snap_path = format!("{remote_base}/diffs/{diff_dir}");
             debug!("Purging matching files from {}", diff_snap_path);
             rclone.delete(&diff_snap_path, &includes)?;
-            let _ = rclone.rmdirs(&diff_snap_path, true);
+            for t in norm_targets {
+                let _ = rclone.rmdir_specific(&format!("{diff_snap_path}/{t}"));
+            }
         }
     }
 
@@ -614,13 +618,17 @@ fn run_remove_snapshots_inner(
     for dir in &diff_dirs_to_purge {
         let clean_dir = dir.trim_matches('/');
         let diff_path = format!("{remote_clean}/diffs/{clean_dir}");
-        info!("Deleting diff directory {}", diff_path);
+        info!("Deleting files in diff directory {}", diff_path);
         if let Err(e) = rclone.delete(&diff_path, &[]) {
-            warn!("Failed to delete diff directory {}: {}", diff_path, e);
+            warn!("Failed to delete files in diff directory {}: {}", diff_path, e);
         }
-        let _ = rclone.rmdirs(&diff_path, false);
+        if let Err(e) = rclone.rmdir_specific(&diff_path) {
+            warn!(
+                "[WARN] Could not remove empty diff directory '{}' ({e}). Please manually remove it if needed: rclone rmdirs \"{}\"",
+                diff_path, diff_path
+            );
+        }
     }
-    let _ = rclone.rmdirs(&format!("{remote_clean}/diffs/"), true);
 
     // Step 8: Delete manifests of removed snapshots
     let manifests_dir = format!("{remote_clean}/.meta/manifests/");
