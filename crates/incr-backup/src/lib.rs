@@ -42,4 +42,5 @@ pub mod lock;
 pub mod remove;
 pub mod compact;
 pub mod catalog;
+pub mod gc;
 pub mod error;

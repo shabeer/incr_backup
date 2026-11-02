@@ -27,6 +27,7 @@
    - [verify & space analysis](#verify--space-analysis)
    - [remove & snapshot history purging](#remove--snapshot-history-purging)
    - [remove_snapshots: Pruning Past Snapshots by Timestamp](#removesnapshots-pruning-past-snapshots-by-timestamp)
+   - [gc: Garbage Collection & Orphaned Diff Pruning](#gc-garbage-collection--orphaned-diff-pruning)
    - [config: synchronizing local & remote metadata](#config-synchronizing-local--remote-metadata)
 5. [Crash Recovery: Write-Ahead Journal (WAL)](#5-crash-recovery-write-ahead-journal-wal)
 6. [Advisory Locking & Concurrency](#6-advisory-locking--concurrency)
@@ -775,6 +776,34 @@ incr-backup remove_snapshots --to 2026-10-28 --json
 
 # Break a stale lock if necessary
 incr-backup remove_snapshots --to snap2 --force
+```
+
+---
+
+### `gc`: Garbage Collection & Orphaned Diff Pruning
+
+The `gc` command provides dedicated garbage collection for remote storage. Over time, physical directories in `diffs/` can become orphaned (e.g. if snapshot manifests were deleted before physical diff purging was introduced, if manifests were removed out-of-band, or if a sync/compaction was interrupted).
+
+#### Architecture & Safety Rules:
+1. **Authoritative Manifests**: Snapshot manifests in `.meta/manifests/*.json` serve as the single source of truth for active snapshots.
+2. **Multi-Strategy Active Matching**: A diff directory is marked active (and retained) if it matches an active manifest's stem, `snapshot_name`, prefix (`stem__`), explicit `diff_dir` in `.meta/snapshots.jsonl`, or `restore::find_snapshot_diff_dir`.
+3. **Orphan Identification & Pruning**: Any directory under `diffs/` without a corresponding active manifest is considered orphaned and purged via `rclone.purge`.
+4. **Catalog Self-Healing**: After purging orphaned diffs, any stale entries in `.meta/snapshots.jsonl` are automatically cleaned up.
+5. **Dry-Run & JSON Support**: Fully supports `-n / --dry-run` to preview file counts and byte sizes that would be freed, as well as `--json` for automation.
+
+#### Usage:
+```bash
+# Preview orphaned diff directories without modifying remote
+incr-backup gc --orphaned-diffs --dry-run
+
+# Purge orphaned diff directories and reclaim remote storage
+incr-backup gc --orphaned-diffs
+
+# Output structured JSON report
+incr-backup gc --orphaned-diffs --json
+
+# Break stale lock if another process died
+incr-backup gc --orphaned-diffs --force
 ```
 
 ---

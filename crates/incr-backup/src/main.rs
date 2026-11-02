@@ -16,6 +16,7 @@ use incr_backup::changelog::{format_changelog, run_changelog, ChangelogOptions};
 use incr_backup::config::{CliOverrides, Config, SnapshotTimezone};
 use incr_backup::diff::{DiffOptions, run_diff};
 use incr_backup::error::IncrError;
+use incr_backup::gc::{run_gc, GcOptions};
 use incr_backup::manifest::{format_size, Manifest};
 use incr_backup::rclone::Rclone;
 use incr_backup::remove::{RemoveOptions, RemoveSnapshotsOptions, run_remove, run_remove_snapshots};
@@ -270,6 +271,21 @@ enum Commands {
         force: bool,
     },
 
+    /// Garbage collection: identify and clean up unreferenced or stale remote data.
+    Gc {
+        /// Delete orphaned diff directories that have no corresponding snapshot manifests.
+        #[arg(long = "orphaned-diffs")]
+        orphaned_diffs: bool,
+
+        /// Break stale lock and run if locked.
+        #[arg(long)]
+        force: bool,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage configuration between local file and remote metadata.
     Config {
         #[command(subcommand)]
@@ -445,6 +461,14 @@ fn run_command(cli: Cli) -> incr_backup::error::Result<()> {
             force,
         } => {
             cmd_compact(config, from, to, name, summary, full_list, force)?;
+        }
+
+        Commands::Gc {
+            orphaned_diffs,
+            force,
+            json,
+        } => {
+            cmd_gc(config, orphaned_diffs, force, json)?;
         }
 
         Commands::Config { action } => {
@@ -1096,6 +1120,77 @@ fn cmd_remove_snapshots(
             println!(
                 "\n✓ Successfully deleted {} snapshot(s). Remaining snapshots: {}.",
                 result.snapshots_removed, result.snapshots_remaining
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_gc(
+    config: Config,
+    orphaned_diffs: bool,
+    force: bool,
+    json: bool,
+) -> incr_backup::error::Result<()> {
+    let rclone = Rclone::new(&config);
+    let options = GcOptions {
+        orphaned_diffs,
+        force_lock: force,
+        dry_run: config.dry_run,
+        json,
+    };
+
+    let result = run_gc(&config, &rclone, &options)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if result.dry_run {
+        println!(
+            "[DRY-RUN] Simulating garbage collection at {}:",
+            config.remote_path
+        );
+        if result.total_orphaned_dirs == 0 {
+            println!("\n[DRY-RUN] No orphaned diff directories found. All diff directories correspond to active snapshot manifests.");
+        } else {
+            println!("\n[DRY-RUN] Orphaned diff directories that would be purged:");
+            for diff in &result.orphaned_diffs {
+                println!(
+                    "  * {} ({} files, {})",
+                    diff.path,
+                    diff.file_count,
+                    format_size(diff.size_bytes)
+                );
+            }
+            println!(
+                "\n[DRY-RUN] Summary: {} orphaned diff directory/ies would be purged ({} files, {} freed).",
+                result.total_orphaned_dirs,
+                result.total_files,
+                format_size(result.total_bytes)
+            );
+        }
+    } else {
+        println!(
+            "Garbage collection at {}:",
+            config.remote_path
+        );
+        if result.total_orphaned_dirs == 0 {
+            println!("\nNo orphaned diff directories found. All diff directories correspond to active snapshot manifests.");
+        } else {
+            println!("\nPurged orphaned diff directories:");
+            for diff in &result.orphaned_diffs {
+                println!(
+                    "  ✓ {} ({} files, {})",
+                    diff.path,
+                    diff.file_count,
+                    format_size(diff.size_bytes)
+                );
+            }
+            println!(
+                "\n✓ Successfully purged {} orphaned diff directory/ies ({} files, {} freed).",
+                result.total_orphaned_dirs,
+                result.total_files,
+                format_size(result.total_bytes)
             );
         }
     }

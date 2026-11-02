@@ -253,6 +253,7 @@ Commands:
   compact  Consolidate snapshots in a date range into a single snapshot (--from, --to, --name, --summary, --full-list)
   remove   Remove a given directory or file(s) from all snapshots (alias: rm) (--path, --force, --json)
   remove_snapshots Delete all snapshots up to and including a given cutoff timestamp (alias: remove-snapshots) (--to, --force, --json)
+  gc       Garbage collection: identify and clean up unreferenced or stale remote data (--orphaned-diffs, --force, --json)
   config   Manage configuration between local file and remote metadata (push, pull, diff)
   help     Print help information
 
@@ -303,6 +304,8 @@ Test coverage includes:
 - **`test_locking.rs`**: Mutual exclusion, stale lock detection, and force break overrides.
 - **`test_verify.rs`**: Structural integrity, file counts, sizes, remote checksum verification, and space reports.
 - **`test_remove.rs`**: Single file and directory tree purging across current mirror and all historical diffs, manifest rewrites, dry-run mode, JSON output, and root protection.
+- **`test_remove_snapshots.rs`**: Time-bounded snapshot deletion (`--to`), multi-strategy physical diff directory purge, baseline promotion cleanup, and survivor point-in-time restore verification.
+- **`test_gc.rs`**: Garbage collection of orphaned diff directories (`--orphaned-diffs`), manifest cross-referencing, safe dry-run mode, JSON reporting, and catalog synchronization.
 - **`test_compact.rs`**: Dynamic snapshot consolidation, ISO-8601 timezone offset validation, single-snapshot aliasing, intra-range create/delete lifecycle, dry-run modes (`--summary`, `--full-list`), and mathematical point-in-time restore across pre-range, consolidated, and post-range snapshots.
 - **`test_config.rs`**: Bidirectional configuration sync (`config push`, `config pull`), diff inspection (`config diff`), overwrite safety guards, and TOML timezone parsing (unquoted, sub-table placement, `[snapshot]`).
 
