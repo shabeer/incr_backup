@@ -27,6 +27,7 @@
    - [verify & space analysis](#verify--space-analysis)
    - [remove & snapshot history purging](#remove--snapshot-history-purging)
    - [remove_snapshots: Pruning Past Snapshots by Timestamp](#removesnapshots-pruning-past-snapshots-by-timestamp)
+     - [Understanding CLI Output: "Deleted Snapshots" vs. "Purged Diff Directories"](#understanding-cli-output-deleted-snapshots-vs-purged-diff-directories)
    - [gc: Garbage Collection & Orphaned Diff Pruning](#gc-garbage-collection--orphaned-diff-pruning)
    - [config: synchronizing local & remote metadata](#config-synchronizing-local--remote-metadata)
 5. [Crash Recovery: Write-Ahead Journal (WAL)](#5-crash-recovery-write-ahead-journal-wal)
@@ -692,7 +693,7 @@ This is the reverse-incremental equivalent of retention policy pruning (e.g. `re
 ```mermaid
 flowchart TD
     A["CLI: remove_snapshots --to <cutoff>"] --> B["Acquire Remote Advisory Lock (.meta/lock)"]
-    B --> C["Discover Snapshots (.meta/manifests/*.json)"]
+    B --> C["Load Snapshot Catalog (.meta/snapshots.jsonl / .meta/snapshot.jsonl)<br/>(Rebuild & save from manifests if missing)"]
     C --> D["Resolve Cutoff & Partition:<br/>• to_remove (created_at <= cutoff)<br/>• to_keep (created_at > cutoff)"]
     D --> E["Identify Diff Dirs to Purge:<br/>• All diffs/<dir> from to_remove<br/>• diffs/<dir> of first survivor S_first_after (orphaned history)"]
     E --> F{"Is Dry Run (-n)?"}
@@ -706,7 +707,7 @@ flowchart TD
 ```
 
 1. **Advisory Lock Acquisition**: Acquires `.meta/lock` (with `--force` option to break stale locks if needed).
-2. **Snapshot Discovery & Partitioning**: Reads all manifests from `.meta/manifests/` (excluding `current.json`), sorts them chronologically, and partitions them into:
+2. **Snapshot Discovery & Partitioning (Catalog-Accelerated)**: Reads snapshots from `.meta/snapshots.jsonl` (or fallback `.meta/snapshot.jsonl`) in a single network call. If the catalog does not exist or is corrupted, it automatically rebuilds the catalog from `.meta/manifests/` using fast header inspection, saves it to remote storage, and proceeds. Sorts snapshots chronologically and partitions them into:
    - `to_remove`: All snapshots whose `created_at <= cutoff_timestamp`.
    - `to_keep`: All snapshots whose `created_at > cutoff_timestamp`.
 3. **Diff Directories Determination**:
@@ -743,6 +744,56 @@ flowchart TD
    - What was inside `diffs/S_{first_after}`? It stored files from the snapshot immediately preceding it ($S_{last\_deleted}$) that were changed when $S_{first\_after}$ was synced.
    - Because $S_{last\_deleted}$ and all prior snapshots are deleted, **no surviving snapshot ($S \ge S_{first\_after}$) ever needs those files**.
    - Purging `diffs/S_{first_after}` safely reclaims the disk/cloud space of the deleted history and cleanly promotes $S_{first\_after}$ to the new earliest baseline snapshot.
+
+---
+
+#### Understanding CLI Output: "Deleted Snapshots" vs. "Purged Diff Directories"
+
+When executing `remove_snapshots`, you may observe output where a surviving snapshot's diff directory appears under `Purged diff directories:`:
+
+```text
+Removing snapshot(s) up to '2026-11-02T00-03+0530' at gdrive:backup/myhost:
+
+Deleted snapshots:
+  ✓ 2026-11-02T00-03+0530
+
+Purged diff directories:
+  ✓ diffs/2026-11-02T00-03+0530/
+  ✓ diffs/2026-11-02T00-33+0530/
+
+✓ Successfully deleted 1 snapshot(s). Remaining snapshots: 1.
+```
+
+##### 1. Why are diff directories purged during `remove_snapshots`?
+In `incr-backup`, each snapshot consists of two distinct components on remote storage:
+- **Metadata manifest** (`.meta/manifests/<name>.json`): The catalog of files, timestamps, and checksums representing that restorable snapshot.
+- **Physical historical files** (`diffs/<name>/`): Old file versions moved out of `current/` by `rclone sync --backup-dir` whenever a sync modified or deleted existing files.
+
+If `remove_snapshots` only deleted the `.meta/manifests/*.json` manifest files, all the historical files in `diffs/` would remain orphaned on remote storage forever, consuming storage quota and increasing cloud hosting costs. Purging diff directories ensures real cloud storage reclamation.
+
+##### 2. Why was `diffs/2026-11-02T00-33+0530/` purged if snapshot `2026-11-02T00-33+0530` was NOT deleted?
+**Crucial distinction:** The snapshot `2026-11-02T00-33+0530` itself was **NOT deleted**.
+- Under `Deleted snapshots:`, only `2026-11-02T00-03+0530` is listed. Its manifest was deleted.
+- Snapshot `2026-11-02T00-33+0530` retains its manifest (`.meta/manifests/2026-11-02T00-33+0530.json`), remains listed in `incr-backup list`, and is 100% restorable.
+- Only its physical directory in `diffs/` (`diffs/2026-11-02T00-33+0530/`) was purged.
+
+###### The Reverse-Incremental "Displaced Files" Principle:
+In reverse-incremental backups with `rclone sync --backup-dir diffs/<snapshot>/`:
+- `current/` always contains the latest, up-to-date state.
+- When snapshot `S2 (00-33)` was created, `rclone sync` moved modified or deleted files out of `current/` into `diffs/00-33/`.
+- **Those displaced files in `diffs/00-33/` actually represented the state of `S1 (00-03)` (the previous snapshot), NOT `S2 (00-33)`!**
+
+| Snapshot | Created At | Files inside its `diffs/` folder belong to: |
+| :--- | :--- | :--- |
+| `S1 (00-03)` | Cutoff Target (Deleted) | Baseline snapshot (empty or pre-adopt files) |
+| `S2 (00-33)` | First Survivor (Kept) | **`S1 (00-03)`** (files modified/deleted when S2 ran) |
+| `S3 (01-03)` | Later Survivor (Kept) | **`S2 (00-33)`** (files modified/deleted when S3 ran) |
+
+###### Baseline Promotion Mechanics:
+1. When all snapshots prior to `00-33` were deleted, `00-33` became the **earliest remaining snapshot** (the new baseline).
+2. The files in `diffs/00-33/` only existed to restore the deleted snapshot `00-03`.
+3. To restore `00-33`, the restore algorithm checks `current/` and diff directories created **after** `00-33` (such as `diffs/01-03/`). It never checks its own `diffs/00-33/`.
+4. Therefore, `diffs/00-33/` became obsolete orphaned history against deleted snapshots. Purging it reclaims space, and the snapshot catalog updates `diff_dir = None` for `00-33`, officially establishing it as a clean baseline.
 
 ---
 

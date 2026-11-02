@@ -47,46 +47,50 @@ pub struct SnapshotSummary {
     pub total_size: u64,
 }
 
-/// Load the snapshot catalog from `<remote>/.meta/snapshots.jsonl`.
+/// Load the snapshot catalog from `<remote>/.meta/snapshots.jsonl` (or fallback `<remote>/.meta/snapshot.jsonl`).
 ///
 /// If the catalog does not exist or cannot be parsed, falls back to rebuilding
 /// it by scanning remote manifests and writing the new catalog file.
 pub fn load_snapshot_catalog(rclone: &Rclone, remote_base: &str) -> Result<Vec<SnapshotSummary>> {
     let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
+    let alt_path = format!("{remote_base}/.meta/snapshot.jsonl");
 
-    match rclone.cat(&catalog_path) {
-        Ok(content) if !content.trim().is_empty() => {
-            let mut entries = Vec::new();
-            let mut parse_failed = false;
+    let loaded = match rclone.cat(&catalog_path) {
+        Ok(content) if !content.trim().is_empty() => Some((catalog_path.clone(), content)),
+        _ => match rclone.cat(&alt_path) {
+            Ok(content) if !content.trim().is_empty() => Some((alt_path.clone(), content)),
+            _ => None,
+        },
+    };
 
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<SnapshotSummary>(trimmed) {
-                    Ok(entry) => entries.push(entry),
-                    Err(e) => {
-                        log::warn!("Corrupt line in catalog {catalog_path}: {e}");
-                        parse_failed = true;
-                        break;
-                    }
+    if let Some((path, content)) = loaded {
+        let mut entries = Vec::new();
+        let mut parse_failed = false;
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<SnapshotSummary>(trimmed) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    log::warn!("Corrupt line in catalog {path}: {e}");
+                    parse_failed = true;
+                    break;
                 }
             }
-
-            if !parse_failed && !entries.is_empty() {
-                entries.sort_by_key(|s| s.created_at);
-                return Ok(entries);
-            }
-
-            log::info!("Catalog was empty or corrupted; rebuilding from manifests");
-            rebuild_snapshot_catalog(rclone, remote_base)
         }
-        _ => {
-            // Not found or cat failed: rebuild from manifests
-            rebuild_snapshot_catalog(rclone, remote_base)
+
+        if !parse_failed && !entries.is_empty() {
+            entries.sort_by_key(|s| s.created_at);
+            return Ok(entries);
         }
+
+        log::info!("Catalog was empty or corrupted; rebuilding from manifests");
     }
+
+    rebuild_snapshot_catalog(rclone, remote_base)
 }
 
 /// Rebuild the snapshot catalog by scanning `.meta/manifests/` and matching `diffs/`.
@@ -178,13 +182,14 @@ pub fn rebuild_snapshot_catalog(
     Ok(sorted)
 }
 
-/// Save the snapshot catalog to `<remote>/.meta/snapshots.jsonl`.
+/// Save the snapshot catalog to `<remote>/.meta/snapshots.jsonl` (and `<remote>/.meta/snapshot.jsonl` if present).
 pub fn save_snapshot_catalog(
     rclone: &Rclone,
     remote_base: &str,
     catalog: &[SnapshotSummary],
 ) -> Result<()> {
     let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
+    let alt_path = format!("{remote_base}/.meta/snapshot.jsonl");
     let mut lines = String::new();
     for entry in catalog {
         let line = serde_json::to_string(entry).map_err(IncrError::Json)?;
@@ -192,6 +197,11 @@ pub fn save_snapshot_catalog(
         lines.push('\n');
     }
     rclone.rcat(&catalog_path, &lines)?;
+    if let Ok(c) = rclone.cat(&alt_path) {
+        if !c.trim().is_empty() {
+            let _ = rclone.rcat(&alt_path, &lines);
+        }
+    }
     Ok(())
 }
 
@@ -202,8 +212,17 @@ pub fn append_or_update_catalog_entry(
     entry: SnapshotSummary,
 ) -> Result<()> {
     let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
-    let mut entries = match rclone.cat(&catalog_path) {
-        Ok(content) if !content.trim().is_empty() => {
+    let alt_path = format!("{remote_base}/.meta/snapshot.jsonl");
+    let content = match rclone.cat(&catalog_path) {
+        Ok(c) if !c.trim().is_empty() => Some(c),
+        _ => match rclone.cat(&alt_path) {
+            Ok(c) if !c.trim().is_empty() => Some(c),
+            _ => None,
+        },
+    };
+
+    let mut entries = match content {
+        Some(content) => {
             let mut list = Vec::new();
             for line in content.lines() {
                 let trimmed = line.trim();
@@ -216,7 +235,7 @@ pub fn append_or_update_catalog_entry(
             }
             list
         }
-        _ => {
+        None => {
             // If catalog doesn't exist yet, rebuild it from manifests first
             rebuild_snapshot_catalog(rclone, remote_base).unwrap_or_default()
         }
@@ -239,8 +258,17 @@ pub fn remove_from_catalog(
     purged_diff_dirs: &HashSet<String>,
 ) -> Result<()> {
     let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
-    let mut entries = match rclone.cat(&catalog_path) {
-        Ok(content) if !content.trim().is_empty() => {
+    let alt_path = format!("{remote_base}/.meta/snapshot.jsonl");
+    let content = match rclone.cat(&catalog_path) {
+        Ok(c) if !c.trim().is_empty() => Some(c),
+        _ => match rclone.cat(&alt_path) {
+            Ok(c) if !c.trim().is_empty() => Some(c),
+            _ => None,
+        },
+    };
+
+    let mut entries = match content {
+        Some(content) => {
             let mut list = Vec::new();
             for line in content.lines() {
                 let trimmed = line.trim();
@@ -264,7 +292,7 @@ pub fn remove_from_catalog(
             }
             list
         }
-        _ => {
+        None => {
             let mut list = rebuild_snapshot_catalog(rclone, remote_base).unwrap_or_default();
             list.retain(|item| {
                 let stem = item.manifest_name.trim_end_matches(".json");
@@ -295,8 +323,17 @@ pub fn update_catalog_after_compaction(
     purged_names: &HashSet<String>,
 ) -> Result<()> {
     let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
-    let mut entries = match rclone.cat(&catalog_path) {
-        Ok(content) if !content.trim().is_empty() => {
+    let alt_path = format!("{remote_base}/.meta/snapshot.jsonl");
+    let content = match rclone.cat(&catalog_path) {
+        Ok(c) if !c.trim().is_empty() => Some(c),
+        _ => match rclone.cat(&alt_path) {
+            Ok(c) if !c.trim().is_empty() => Some(c),
+            _ => None,
+        },
+    };
+
+    let mut entries = match content {
+        Some(content) => {
             let mut list = Vec::new();
             for line in content.lines() {
                 let trimmed = line.trim();
@@ -315,7 +352,7 @@ pub fn update_catalog_after_compaction(
             }
             list
         }
-        _ => {
+        None => {
             let mut list = rebuild_snapshot_catalog(rclone, remote_base).unwrap_or_default();
             list.retain(|item| {
                 let stem = item.manifest_name.trim_end_matches(".json");

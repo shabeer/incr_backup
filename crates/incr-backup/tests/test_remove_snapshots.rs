@@ -608,3 +608,139 @@ fn test_remove_snapshots_purges_physical_diff_directories() {
     assert_eq!(std::fs::read_to_string(restore_s4_dir.join("fileD.txt")).unwrap(), "D v1");
     assert!(!restore_s4_dir.join("fileB.txt").exists());
 }
+
+#[test]
+fn test_remove_snapshots_auto_builds_catalog_when_missing() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str()])
+        .assert()
+        .success();
+
+    env.write_source_file("f.txt", b"v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap1"])
+        .assert()
+        .success();
+
+    env.write_source_file("f.txt", b"v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap2"])
+        .assert()
+        .success();
+
+    env.write_source_file("f.txt", b"v3");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap3"])
+        .assert()
+        .success();
+
+    // Delete snapshots.jsonl and snapshot.jsonl to simulate missing catalog
+    let catalog_path = env.remote_path.join(".meta/snapshots.jsonl");
+    let alt_catalog_path = env.remote_path.join(".meta/snapshot.jsonl");
+    if catalog_path.exists() {
+        std::fs::remove_file(&catalog_path).unwrap();
+    }
+    if alt_catalog_path.exists() {
+        std::fs::remove_file(&alt_catalog_path).unwrap();
+    }
+    assert!(!catalog_path.exists(), "catalog must be missing before remove_snapshots");
+    assert!(!alt_catalog_path.exists(), "alt catalog must be missing before remove_snapshots");
+
+    // Run remove_snapshots --to snap2
+    // It should automatically rebuild the catalog from manifests and execute the removal
+    env.command()
+        .args([
+            "remove_snapshots",
+            "--to",
+            "snap2",
+            "--remote",
+            &env.remote_str(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Successfully deleted 2 snapshot(s)"))
+        .stdout(predicate::str::contains("Remaining snapshots: 1"));
+
+    // Verify catalog was rebuilt and updated
+    assert!(catalog_path.exists(), "snapshots.jsonl catalog should be automatically rebuilt and saved");
+    let catalog_content = std::fs::read_to_string(&catalog_path).unwrap();
+    assert!(!catalog_content.contains("snap1"), "snap1 must be removed");
+    assert!(!catalog_content.contains("snap2"), "snap2 must be removed");
+    assert!(catalog_content.contains("snap3"), "snap3 must remain in rebuilt catalog");
+
+    // Verify surviving snapshot restores correctly
+    let restore_dir = env.temp_dir.path().join("restore_snap3");
+    env.command()
+        .args([
+            "restore",
+            "snap3",
+            "--to",
+            &restore_dir.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(restore_dir.join("f.txt")).unwrap(), "v3");
+}
+
+#[test]
+fn test_remove_snapshots_uses_alt_snapshot_jsonl() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str()])
+        .assert()
+        .success();
+
+    env.write_source_file("f.txt", b"v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap1"])
+        .assert()
+        .success();
+
+    env.write_source_file("f.txt", b"v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap2"])
+        .assert()
+        .success();
+
+    env.write_source_file("f.txt", b"v3");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap3"])
+        .assert()
+        .success();
+
+    // Rename snapshots.jsonl to snapshot.jsonl (singular)
+    let catalog_path = env.remote_path.join(".meta/snapshots.jsonl");
+    let alt_catalog_path = env.remote_path.join(".meta/snapshot.jsonl");
+    if catalog_path.exists() {
+        std::fs::rename(&catalog_path, &alt_catalog_path).unwrap();
+    }
+    assert!(!catalog_path.exists(), "snapshots.jsonl must not exist");
+    assert!(alt_catalog_path.exists(), "snapshot.jsonl must exist");
+
+    // Run remove_snapshots --to snap2
+    env.command()
+        .args([
+            "remove_snapshots",
+            "--to",
+            "snap2",
+            "--remote",
+            &env.remote_str(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Successfully deleted 2 snapshot(s)"))
+        .stdout(predicate::str::contains("Remaining snapshots: 1"));
+
+    // Verify snapshot.jsonl is kept up to date
+    assert!(alt_catalog_path.exists(), "snapshot.jsonl must still exist");
+    let alt_content = std::fs::read_to_string(&alt_catalog_path).unwrap();
+    assert!(!alt_content.contains("snap1"), "snap1 must be removed from snapshot.jsonl");
+    assert!(!alt_content.contains("snap2"), "snap2 must be removed from snapshot.jsonl");
+    assert!(alt_content.contains("snap3"), "snap3 must remain in snapshot.jsonl");
+}
