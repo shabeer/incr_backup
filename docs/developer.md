@@ -697,7 +697,7 @@ flowchart TD
     D --> E["Identify Diff Dirs to Purge:<br/>• All diffs/<dir> from to_remove<br/>• diffs/<dir> of first survivor S_first_after (orphaned history)"]
     E --> F{"Is Dry Run (-n)?"}
     F -->|Yes| G["Log Summary & Return Plan (0 mutations)"]
-    F -->|No| H["Purge Remote Diff Directories (rclone purge)"]
+    F -->|No| H["Delete Remote Diff Directories (rclone delete --rmdirs)"]
     H --> I["Delete Manifests of Removed Snapshots (rclone deletefile)"]
     I --> J["Update Snapshot Catalog (.meta/snapshots.jsonl):<br/>• Remove deleted snapshots<br/>• Set diff_dir = None for S_first_after (clean baseline)"]
     J --> K["Clean Empty Dirs (rclone rmdirs --leave-root)"]
@@ -714,7 +714,7 @@ flowchart TD
    - If at least one snapshot is deleted and surviving snapshots exist, it **also purges the diff directory of the first surviving snapshot ($S_{first\_after}$)**.
 4. **Purge & Commit**:
    - If `--dry-run` (`-n`) is active, logs all snapshots and diff directories that would be purged and exits without modifying remote storage.
-   - Otherwise, executes `rclone purge` for the target diff directories, deletes the corresponding JSON manifests from `.meta/manifests/`, and cleans up empty subdirectories.
+   - Otherwise, executes `rclone delete --rmdirs` for the target diff directories, deletes the corresponding JSON manifests from `.meta/manifests/`, and cleans up empty subdirectories via `rclone rmdirs`.
 5. **Snapshot Catalog Synchronization (`.meta/snapshots.jsonl`)**:
    - Immediately after deleting manifests, `remove_snapshots` calls `crate::catalog::remove_from_catalog(rclone, remote_base, &names_to_remove, &purged_diff_set)`.
    - **Removes Pruned Records**: Drops all deleted snapshots from the catalog index.
@@ -754,7 +754,7 @@ flowchart TD
 | **Recovery Points** | **Permanently dropped**: All points at or before $T$ are gone forever. | **Consolidated**: Earlier points within range are rolled into a single anchor snapshot; pre-range restore remains intact. |
 | **Pre-Range History** | Recovery prior to $T$ is impossible. | Preserved. Rollbacks before $T_1$ remain fully functional. |
 | **Historical Diffs** | `diff` and `changelog` across the cutoff boundary are no longer possible (fails with `SnapshotNotFound`). | Preserves consolidated manifests for long-term diffing and changelog tracking. |
-| **Bandwidth & Remote Operations** | Deletes remote files/directories directly via server-side purge. | Two-phase staged server-side copy, hash verification, commit, and purge. |
+| **Bandwidth & Remote Operations** | Deletes remote files/directories directly via server-side delete. | Two-phase staged server-side copy, hash verification, commit, and delete. |
 
 #### Examples:
 
@@ -787,7 +787,7 @@ The `gc` command provides dedicated garbage collection for remote storage. Over 
 #### Architecture & Safety Rules:
 1. **Authoritative Manifests**: Snapshot manifests in `.meta/manifests/*.json` serve as the single source of truth for active snapshots.
 2. **Multi-Strategy Active Matching**: A diff directory is marked active (and retained) if it matches an active manifest's stem, `snapshot_name`, prefix (`stem__`), explicit `diff_dir` in `.meta/snapshots.jsonl`, or `restore::find_snapshot_diff_dir`.
-3. **Orphan Identification & Pruning**: Any directory under `diffs/` without a corresponding active manifest is considered orphaned and purged via `rclone.purge`.
+3. **Orphan Identification & Pruning**: Any directory under `diffs/` without a corresponding active manifest is considered orphaned and deleted via `rclone.delete` (with `--rmdirs`).
 4. **Catalog Self-Healing**: After purging orphaned diffs, any stale entries in `.meta/snapshots.jsonl` are automatically cleaned up.
 5. **Dry-Run & JSON Support**: Fully supports `-n / --dry-run` to preview file counts and byte sizes that would be freed, as well as `--json` for automation.
 
@@ -885,7 +885,7 @@ When `incr-backup` runs, it checks for an existing journal:
 3. Every operation in the pipeline is **strictly idempotent**:
    - `rclone sync` skips files already uploaded (hash matching).
    - `rclone moveto` on already-moved directories is a no-op.
-   - `rclone purge` on already-deleted directories is a no-op.
+   - `rclone delete` on already-deleted files/directories is a no-op.
    - Manifest generation and upload overwrites cleanly.
 4. Once all steps complete, `.meta/journal.json` is safely deleted.
 

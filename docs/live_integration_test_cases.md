@@ -56,7 +56,7 @@ patterns = [
 ### Dynamic Test Isolation Harness (`LiveGdriveTestEnv`)
 To ensure zero cross-test interference, tests dynamically create unique, isolated directory namespaces on Google Drive:
 - **Format**: `kaleemshabeer01_5TB_testing:/live_<test_name>_<timestamp>_<pid>`
-- **Automatic Teardown**: Implements the `Drop` trait, executing `rclone purge` on the unique remote directory upon test completion or failure.
+- **Automatic Teardown**: Implements the `Drop` trait, executing `rclone delete --rmdirs` and `rclone rmdirs` on the unique remote directory upon test completion or failure.
 - **Local Isolation**: A temporary directory (`tempfile::TempDir`) hosts the local source files and restore outputs.
 
 ---

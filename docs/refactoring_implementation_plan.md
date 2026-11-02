@@ -109,7 +109,7 @@ shabeer_incr_backup/
 
 ### 3.3. Backup Domain Layer (`crates/incr-backup`)
 
-- **`rclone.rs`**: Wraps `common::subprocess::SubprocessRunner` to execute rclone commands (`sync`, `copy`, `rcat`, `cat`, `delete_file`, `purge`, `size`, `lsjson`, `lsd`, `lsf`, `mkdir`).
+- **`rclone.rs`**: Wraps `common::subprocess::SubprocessRunner` to execute rclone commands (`sync`, `copy`, `rcat`, `cat`, `delete_file`, `delete`, `size`, `lsjson`, `lsd`, `lsf`, `mkdir`).
 - **`scanner.rs`**: Delegates directory traversal and hashing to `common::fs::scan_directory`, mapping output into backup `FileEntry` records.
 - **`manifest.rs`**: Delegates collection diffing to `common::diff::diff_collections` and byte formatting to `common::format::format_size`.
 - **`lock.rs`**: Implements `LockBackend` as `RcloneLockBackend` targeting `{remote_base}/.meta/lock`, wrapping `GenericLockManager`.

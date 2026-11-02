@@ -798,7 +798,7 @@ fn execute_compact_plan(
     let final_diff_dir = format!("{remote_base}/diffs/{}", plan.name);
 
     // Clean up any existing staging from aborted previous runs
-    let _ = rclone.purge(&staging_dir);
+    let _ = rclone.delete_dir(&staging_dir);
     let _ = rclone.delete_file(&staging_manifest);
 
     info!(
@@ -828,7 +828,7 @@ fn execute_compact_plan(
     let staged_json = rclone.cat(&staging_manifest)?;
     let parsed_manifest = Manifest::from_json(&staged_json)?;
     if parsed_manifest.files.len() != plan.anchor_snapshot.manifest.files.len() {
-        let _ = rclone.purge(&staging_dir);
+        let _ = rclone.delete_dir(&staging_dir);
         let _ = rclone.delete_file(&staging_manifest);
         return Err(IncrError::CompactionError(
             "Staged manifest validation failed: file count mismatch".to_string(),
@@ -861,7 +861,7 @@ fn execute_compact_plan(
             match staged_map.get(&file.path) {
                 Some(staged_md5) => {
                     if !file.md5.is_empty() && !staged_md5.is_empty() && file.md5 != *staged_md5 {
-                        let _ = rclone.purge(&staging_dir);
+                        let _ = rclone.delete_dir(&staging_dir);
                         let _ = rclone.delete_file(&staging_manifest);
                         return Err(IncrError::CompactionError(format!(
                             "Hash verification failed for staged file '{}'",
@@ -870,7 +870,7 @@ fn execute_compact_plan(
                     }
                 }
                 None => {
-                    let _ = rclone.purge(&staging_dir);
+                    let _ = rclone.delete_dir(&staging_dir);
                     let _ = rclone.delete_file(&staging_manifest);
                     return Err(IncrError::CompactionError(format!(
                         "Verification failed: file '{}' missing from staging directory",
@@ -889,7 +889,7 @@ fn execute_compact_plan(
         // Move staging directory to final diffs/<name>
         rclone.moveto(&staging_dir.trim_end_matches('/'), &final_diff_dir)?;
     } else {
-        let _ = rclone.purge(&staging_dir);
+        let _ = rclone.delete_dir(&staging_dir);
     }
 
     // Consolidated snapshot is now fully active!
@@ -902,7 +902,7 @@ fn execute_compact_plan(
     for snap in &plan.snapshots_to_purge {
         if let Some(ref dir) = snap.diff_dir {
             let old_diff = format!("{remote_base}/diffs/{dir}");
-            let _ = rclone.purge(&old_diff);
+            let _ = rclone.delete_dir(&old_diff);
         }
         let old_manifest = format!("{remote_base}/.meta/manifests/{}", snap.manifest_name);
         let _ = rclone.delete_file(&old_manifest);

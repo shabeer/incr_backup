@@ -630,9 +630,9 @@ fn run_remove_snapshots_inner(
     for dir in &diff_dirs_to_purge {
         let clean_dir = dir.trim_matches('/');
         let diff_path = format!("{remote_clean}/diffs/{clean_dir}");
-        info!("Purging diff directory {}", diff_path);
-        if let Err(e) = rclone.purge(&diff_path) {
-            warn!("Failed to purge diff directory {}: {}", diff_path, e);
+        info!("Deleting diff directory {}", diff_path);
+        if let Err(e) = rclone.delete(&diff_path, &[]) {
+            warn!("Failed to delete diff directory {}: {}", diff_path, e);
         }
         let _ = rclone.rmdirs(&diff_path, false);
     }

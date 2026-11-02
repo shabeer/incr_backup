@@ -263,9 +263,9 @@ fn run_gc_inner(config: &Config, rclone: &Rclone, options: &GcOptions) -> Result
     // 8. Delete orphaned diff directories on remote
     for item in &orphaned_info {
         let diff_path = format!("{remote_clean}/diffs/{}", item.dir_name);
-        info!("Purging orphaned diff directory {}", diff_path);
-        if let Err(e) = rclone.purge(&diff_path) {
-            warn!("Failed to purge orphaned diff directory {}: {}", diff_path, e);
+        info!("Deleting orphaned diff directory {}", diff_path);
+        if let Err(e) = rclone.delete(&diff_path, &[]) {
+            warn!("Failed to delete orphaned diff directory {}: {}", diff_path, e);
         }
         let _ = rclone.rmdirs(&diff_path, false);
     }

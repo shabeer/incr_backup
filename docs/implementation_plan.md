@@ -755,7 +755,7 @@ gdrive:backup/myhost/                    ← remote base path (configurable)
 | 2 | Compute local file MD5 hashes | Medium | No (local `walkdir` + `md5`) |
 | 3 | Read/write JSON manifests | Low | No |
 | 4 | Call rclone commands as subprocesses | Low | Yes (subprocess) |
-| 5 | Snapshot consolidation & naming | Medium | Yes (rclone moveto/purge) |
+| 5 | Snapshot consolidation & naming | Medium | Yes (rclone moveto/delete) |
 | 6 | Resolve file locations for restore | Medium | No (manifest lookups) |
 | 7 | Diff two manifests | Low | No |
 | 8 | Journal read/write | Low | No |
@@ -976,7 +976,7 @@ incr-backup sync -s ~/Photos    -r gdrive:backups/photos
 ### Phase 1: Foundation (✅ Done)
 - `error.rs` — `SyncError`, `ConfigError`, etc. with `thiserror`
 - `config.rs` — TOML parsing, env var overrides, CLI override merge, validation
-- `rclone.rs` — wrapper: `sync`, `lsjson`, `move`, `purge`, `mkdir`, `delete`, `moveto`, `size`, `cat`, `rcat`
+- `rclone.rs` — wrapper: `sync`, `lsjson`, `move`, `delete`, `mkdir`, `moveto`, `size`, `cat`, `rcat`
 - `scanner.rs` — parallel local scan with `walkdir` + `rayon` + `md5`
 - `manifest.rs` — `Manifest`, `FileEntry`, `DiffResult` structs, JSON serde, `from_rclone_lsjson()`
 - `lock.rs` — create/check/release/break lock

@@ -172,13 +172,22 @@ impl Rclone {
         )
     }
 
-    /// Run `rclone purge <remote_path>`.
+    /// Run `rclone delete <remote_path> --rmdirs` followed by `rclone rmdirs <remote_path>`.
     ///
-    /// Deletes a directory and all its contents. Used to delete obsolete snapshots
-    /// or diff directories during compaction. Idempotent — purging a
-    /// non-existent directory may return an error, which we handle gracefully.
+    /// Deletes all files under `remote_path` using `rclone delete --rmdirs` instead of `rclone purge`,
+    /// then removes empty directory structures.
+    /// Idempotent — non-existent directory errors are handled gracefully.
+    pub fn delete_dir(&self, remote_path: &str) -> Result<String> {
+        let res = self.delete(remote_path, &[]);
+        let _ = self.rmdirs(remote_path, false);
+        res
+    }
+
+    /// Run `rclone delete <remote_path> --rmdirs` followed by `rclone rmdirs <remote_path>`.
+    ///
+    /// Deprecated in favor of `delete_dir` or `delete`: uses `rclone delete --rmdirs` instead of `rclone purge`.
     pub fn purge(&self, remote_path: &str) -> Result<String> {
-        self.run_rclone(&["purge".to_string(), remote_path.to_string()], true)
+        self.delete_dir(remote_path)
     }
 
     /// Run `rclone mkdir <remote_path>`.
@@ -196,11 +205,16 @@ impl Rclone {
         self.run_rclone(&["deletefile".to_string(), remote_path.to_string()], true)
     }
 
-    /// Run `rclone delete <remote_path> [--include <pattern>...]`.
+    /// Run `rclone delete <remote_path> --rmdirs [--include <pattern>...]`.
     ///
-    /// Deletes files in `remote_path` matching include patterns.
+    /// Deletes files in `remote_path` matching include patterns (or all files if empty).
+    /// Uses `--rmdirs` along with `rclone delete` to remove empty directory structures.
     pub fn delete(&self, remote_path: &str, includes: &[String]) -> Result<String> {
-        let mut args = vec!["delete".to_string(), remote_path.to_string()];
+        let mut args = vec![
+            "delete".to_string(),
+            remote_path.to_string(),
+            "--rmdirs".to_string(),
+        ];
         for inc in includes {
             args.push("--include".to_string());
             args.push(inc.clone());
@@ -501,6 +515,14 @@ mod tests {
         let config = test_config();
         let rclone = Rclone::new(&config);
         let result = rclone.delete("remote:dest", &["*.tmp".to_string()]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dry_run_delete_dir_returns_ok() {
+        let config = test_config();
+        let rclone = Rclone::new(&config);
+        let result = rclone.delete_dir("remote:dest");
         assert!(result.is_ok());
     }
 
