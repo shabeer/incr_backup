@@ -573,3 +573,250 @@ fn test_compact_intra_range_created_and_deleted() {
         assert!(!compacted_diff.join("temp.txt").exists());
     }
 }
+
+#[test]
+fn test_compact_uses_snapshot_jsonl() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    env.write_source_file("doc.txt", b"version 1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc", "--name", "snap1"])
+        .assert()
+        .success();
+
+    env.write_source_file("doc.txt", b"version 2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc", "--name", "snap2"])
+        .assert()
+        .success();
+
+    env.write_source_file("doc.txt", b"version 3");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc", "--name", "snap3"])
+        .assert()
+        .success();
+
+    // Rename snapshots.jsonl to snapshot.jsonl (singular fallback)
+    let catalog_path = env.remote_path.join(".meta/snapshots.jsonl");
+    let alt_catalog_path = env.remote_path.join(".meta/snapshot.jsonl");
+    if catalog_path.exists() {
+        fs::rename(&catalog_path, &alt_catalog_path).unwrap();
+    }
+    assert!(!catalog_path.exists(), "snapshots.jsonl must not exist");
+    assert!(alt_catalog_path.exists(), "snapshot.jsonl must exist");
+
+    // Run compact across range covering snap1 and snap2
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            "2020-01-01T00:00:00Z",
+            "--to",
+            "2030-01-01T00:00:00Z",
+            "--name",
+            "daily-all",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("✓ Compaction complete: daily-all"));
+
+    // Verify snapshot.jsonl is kept up to date
+    assert!(alt_catalog_path.exists(), "snapshot.jsonl must still exist");
+    let alt_content = fs::read_to_string(&alt_catalog_path).unwrap();
+    assert!(alt_content.contains("daily-all"), "daily-all must be in snapshot.jsonl");
+    assert!(!alt_content.contains("snap1"), "snap1 must be removed from snapshot.jsonl");
+    assert!(!alt_content.contains("snap2"), "snap2 must be removed from snapshot.jsonl");
+    assert!(!alt_content.contains("snap3"), "snap3 must be removed from snapshot.jsonl");
+}
+
+#[test]
+fn test_compact_validates_timestamps_before_lock() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    // Create a foreign lock on the remote to ensure any lock attempt will fail
+    let lock_json = serde_json::json!({
+        "holder": "foreign-host.local",
+        "pid": 12345,
+        "started_at": chrono::Utc::now().to_rfc3339(),
+        "timeout_minutes": 600000
+    });
+    let meta_dir = env.remote_path.join(".meta");
+    fs::create_dir_all(&meta_dir).unwrap();
+    fs::write(meta_dir.join("lock"), serde_json::to_string(&lock_json).unwrap()).unwrap();
+
+    // 1. Invalid timestamp format must fail fast BEFORE acquiring lock
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            "not-a-valid-timestamp",
+            "--to",
+            "2026-10-28T23:59:59Z",
+            "--name",
+            "daily-test",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid timestamp in --from"))
+        .stderr(predicate::str::contains("backup locked by 'foreign-host.local'").not());
+
+    // 2. Timezone mismatch must fail fast BEFORE acquiring lock
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            "2026-10-28T00:00:00+05:30",
+            "--to",
+            "2026-10-28T23:59:59+05:30",
+            "--name",
+            "daily-test",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Timezone offset in --from (+05:30) does not match configured backup timezone (+00:00)"))
+        .stderr(predicate::str::contains("backup locked by 'foreign-host.local'").not());
+
+    // 3. from > to must fail fast BEFORE acquiring lock
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            "2026-10-29T00:00:00Z",
+            "--to",
+            "2026-10-28T00:00:00Z",
+            "--name",
+            "daily-test",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--from timestamp must be before or equal to --to timestamp"))
+        .stderr(predicate::str::contains("backup locked by 'foreign-host.local'").not());
+
+    // 4. Conversely, with valid timestamps, it proceeds to lock and fails on the lock
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            "2026-10-28T00:00:00Z",
+            "--to",
+            "2026-10-28T23:59:59Z",
+            "--name",
+            "daily-test",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("backup locked by 'foreign-host.local'"));
+}
+
+#[test]
+fn test_compact_recovers_from_interrupted_staging_journal() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    env.write_source_file("doc.txt", b"v0");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc", "--name", "snap0"])
+        .assert()
+        .success();
+
+    env.write_source_file("doc.txt", b"v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc", "--name", "snap1"])
+        .assert()
+        .success();
+
+    env.write_source_file("doc.txt", b"v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc", "--name", "snap2"])
+        .assert()
+        .success();
+
+    // Verify diff in snap1 exists (holding v0)
+    let diff_file = env.remote_path.join("diffs/snap1/doc.txt");
+    assert!(diff_file.exists());
+
+    // Read timestamps from catalog
+    let catalog_content = fs::read_to_string(env.remote_path.join(".meta/snapshots.jsonl")).unwrap();
+    let summaries: Vec<serde_json::Value> = catalog_content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let t_snap1 = summaries.iter().find(|s| s["name"] == "snap1").unwrap()["created_at"].as_str().unwrap();
+    let t_snap2 = summaries.iter().find(|s| s["name"] == "snap2").unwrap()["created_at"].as_str().unwrap();
+
+    // Simulate an ungraceful crash (kill -9) midway through Stage 1 of a previous compaction:
+    // doc.txt from snap1 was moved to .meta/staging/daily-rec/doc.txt and journal was written
+    let staging_dir = env.remote_path.join(".meta/staging/daily-rec");
+    fs::create_dir_all(&staging_dir).unwrap();
+    let staged_file = staging_dir.join("doc.txt");
+    fs::rename(&diff_file, &staged_file).unwrap();
+    assert!(!diff_file.exists());
+    assert!(staged_file.exists());
+
+    let journal_file = env.remote_path.join(".meta/staging/daily-rec.journal.json");
+    let remote_base = env.remote_str();
+    let journal_json = serde_json::json!([
+        [
+            format!("{remote_base}/diffs/snap1/doc.txt"),
+            format!("{remote_base}/.meta/staging/daily-rec/doc.txt")
+        ]
+    ]);
+    fs::write(&journal_file, serde_json::to_string(&journal_json).unwrap()).unwrap();
+
+    // Now run compact: it must detect the journal, recover the staged file back to snap1, and finish compaction successfully!
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            t_snap1,
+            "--to",
+            t_snap2,
+            "--name",
+            "daily-rec",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("✓ Compaction complete: daily-rec"));
+
+    // Verify that daily-rec now has the compacted diff
+    assert!(env.remote_path.join("diffs/daily-rec/doc.txt").exists());
+    assert!(!journal_file.exists(), "journal file must be cleaned up on commit");
+}

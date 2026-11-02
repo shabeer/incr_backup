@@ -318,7 +318,7 @@ If a snapshot has a custom name (e.g. `pre-upgrade-v2` or `daily-2026-10-28`), *
    - `compact` (filtering snapshots within `--from` and `--to` timestamp ranges)
    - `verify` (validating snapshot sequence ordering)
    
-   The engine calls `discover_all_snapshots`, reads each `.meta/manifests/<name>.json`, extracts `manifest.created_at`, and sorts all snapshots chronologically by that timestamp.
+   The engine utilizes the remote snapshot catalog index (`.meta/snapshots.jsonl` / `.meta/snapshot.jsonl`) to load snapshot metadata in a single network round-trip, sorting all snapshots chronologically by `created_at`. If the catalog is absent, it automatically self-heals by discovering manifests in `.meta/manifests/<name>.json`.
 
 3. **Inspecting Timestamps of Custom Snapshots**:
    You can view the identified timestamp of any custom snapshot using:
@@ -543,24 +543,128 @@ When compacting Day 2 `[snap-10:00, snap-14:00, snap-20:00]` into `daily-2026-10
 3. **Intra-Range Created/Deleted Files**: Any file created after Day 1 and deleted before Day 2 20:00 was purely scratch data; it is purged completely.
 4. **Beginning of History**: If no snapshots exist prior to the range, all intra-range diffs are safely discarded because no older snapshots exist to reference them.
 
-#### Two-Phase Safe Compaction Protocol:
+#### Deep-Dive Analysis: Why the Earliest-First Rule? (Earliest vs. Latest Rule)
 
-To ensure network drops or crashes never cause data loss, source snapshots are purged **only after** the consolidated snapshot is fully verified and committed:
+A common intuitive question is:
+> *"When compacting a range of snapshots, shouldn't we keep the **latest** version of each file within the range? Why keep the **earliest**?"*
+
+The reason lies in the fundamental mathematical architecture of **Reverse-Incremental Backups**.
+
+##### 1. Physical Location of File Versions on Remote Storage
+
+In forward-incremental backups (like classic tar or git), you roll forward from an old baseline. But in `incr-backup`, the system is **reverse-incremental**:
+- **`current/` always holds the latest up-to-date state** of every file.
+- **`diffs/` directories hold OLD, displaced versions** moved out of `current/` whenever a sync modifies or deletes existing files.
+
+Consider an example with 100 snapshots ($S_1 \dots S_{100}$) where a file is updated on every single snapshot, producing versions $v_1 \dots v_{100}$.
+
+Here is the exact physical layout of storage across the remote:
+
+| Remote Path | Version Stored | Which Snapshot Needs This File? |
+| :--- | :--- | :--- |
+| `diffs/S_1/` | *(baseline/empty)* | Pre-backup baseline |
+| `diffs/S_2/` | **$v_1$** | $S_1$ (displaced when $S_2$ updated file to $v_2$) |
+| `diffs/S_3/` | **$v_2$** | $S_2$ (displaced when $S_3$ updated file to $v_3$) |
+| $\dots$ | $\dots$ | $\dots$ |
+| `diffs/S_{10}/` | **$v_9$** | **$S_9$** (displaced when $S_{10}$ ran) |
+| `diffs/S_{11}/` | **$v_{10}$** | $S_{10}$ (displaced when $S_{11}$ ran) |
+| $\dots$ | $\dots$ | $\dots$ |
+| `diffs/S_{90}/` | **$v_{89}$** | $S_{89}$ (displaced when $S_{90}$ ran) |
+| `diffs/S_{91}/` | **$v_{90}$** | **$S_{90}$** (displaced when $S_{91}$ ran) |
+| $\dots$ | $\dots$ | $\dots$ |
+| `diffs/S_{100}/` | **$v_{99}$** | $S_{99}$ (displaced when $S_{100}$ ran) |
+| `current/` | **$v_{100}$** | $S_{100}$ (latest active file) |
+
+##### 2. Compacting a Sub-Range: $S_{10}$ to $S_{90}$
+
+Now suppose we compact the range $[S_{10} \dots S_{90}]$ into a single consolidated snapshot:
+$$S_{\text{compact}} = \text{"range-10-90"}$$
+
+1. **The Anchor Snapshot**:
+   $S_{\text{compact}}$ adopts the manifest of $S_{90}$ (the newest snapshot in the range). Its manifest records that the file content is **$v_{90}$**.
+2. **What Versions are Inside the Range's Diffs?**
+   $$\text{Versions in } \text{diffs/}S_{10} \dots \text{diffs/}S_{90} = \{ v_9, v_{10}, \dots, v_{89} \}$$
+   - Notice that **$v_{90}$ is NOT in this range's diffs at all!** $v_{90}$ was displaced into `diffs/S_{91}/` when $S_{91}$ ran, which is *outside and after* the compaction range.
+   - The **Earliest Diff** in the range is in $\text{diffs}/S_{10}$, which holds **$v_9$**.
+   - The **Latest Diff** in the range is in $\text{diffs}/S_{90}$, which holds **$v_{89}$**.
+
+##### 3. How Reverse-Incremental Restore Works Across the Timeline
+
+To restore any snapshot $S_T$, the restore engine starts at `current/` and searches **backward through diff directories created AFTER $T$**:
+
+$$\text{Restore}(S_T) = \text{first diff found in } \{ \text{diffs created after } T \} \text{ with the required checksum; fallback to } \text{current/}$$
+
+Now compare what happens under both rules:
+
+###### Rule A: The Earliest-First Rule (Keep $v_9$ from $\text{diffs}/S_{10}$)
+- **Restoring Future Snapshots ($S_{91} \dots S_{100}$)**:
+  - Diffs for $S_{91} \dots S_{100}$ are strictly after the range. The restore engine never traverses into $S_{\text{compact}}$. $\rightarrow$ **100% Intact**.
+- **Restoring the Compacted Anchor ($S_{\text{compact}} = S_{90}$)**:
+  - To restore $S_{90}$, the engine scans backward from `current/`. The first diff created after $S_{90}$ is `diffs/S_{91}/`, which contains $v_{90}$.
+  - The engine finds $v_{90}$ in `diffs/S_{91}/`! $\rightarrow$ **100% Intact ($v_{90}$)**.
+- **Restoring Pre-Range Past Snapshots ($S_1 \dots S_9$)**:
+  - To restore $S_9$: The manifest of $S_9$ specifies $v_9$. The engine scans backward from `current/`, passes $S_{100} \dots S_{91}$, and enters `diffs/S_compact/`.
+  - In `diffs/S_compact/`, it finds **$v_9$**! $\rightarrow$ **100% Intact ($v_9$)**.
+  - To restore $S_1$: It passes $S_{\text{compact}}$ and finds $v_1$ in `diffs/S_2/`. $\rightarrow$ **100% Intact ($v_1$)**.
+
+**Result:** Every single snapshot from $S_1$ to $S_{100}$ remains 100% restorable with zero data loss!
+
+###### Rule B: The Latest-First Rule (Keep $v_{89}$ from $\text{diffs}/S_{90}$)
+Suppose instead we kept the latest diff in the range ($v_{89}$) and discarded $v_9$:
+- **Restoring $S_{90}$**: Works (it still gets $v_{90}$ from `diffs/S_{91}/`, not from its own diff).
+- **Restoring Pre-Range Past Snapshots ($S_1 \dots S_9$)**:
+  - To restore $S_9$, the manifest requires $v_9$.
+  - The engine searches backward through diffs and reaches `diffs/S_compact/`.
+  - Instead of $v_9$, it finds **$v_{89}$**!
+  - Checksum mismatch! **$S_9$ and earlier snapshots are permanently corrupted and cannot be restored.**
+
+##### 4. Summary Matrix: Earliest-First vs. Latest-First Rule
+
+| Criterion | Earliest-First Rule *(Implemented)* | Latest-First Rule *(Flawed)* |
+| :--- | :--- | :--- |
+| **Point-in-Time Integrity** | **100% Mathematically Sound**: Preserves full point-in-time recovery for all past snapshots ($S_1 \dots S_9$). | ❌ **Corrupts History**: Past snapshots ($S_1 \dots S_9$) fail checksums because they get a near-end scratch version ($v_{89}$) instead of pre-range state ($v_9$). |
+| **Storage Reclaimed** | **Identical**: Exactly 1 file version kept; 80 intermediate scratch diffs ($v_{10} \dots v_{89}$) purged. | **Identical**: Exactly 1 file version kept; 80 intermediate scratch diffs ($v_9 \dots v_{88}$) purged. |
+| **Restore $S_{90}$ ($S_{\text{compact}}$)** | **Works**: Reads $v_{90}$ from `diffs/S_{91}/`. | **Works**: Reads $v_{90}$ from `diffs/S_{91}/`. |
+| **Restore Pre-Range ($S_1 \dots S_9$)** | **Works**: Reads $v_9$ from `diffs/S_compact/`. | ❌ **Fatal Failure**: Fails with hash mismatch or missing file. |
+| **Chaining / Recursive Compaction** | **Fully Composable**: $S_{\text{compact}}$ behaves identically to an original raw snapshot. | ❌ Breaks chronological chaining. |
+
+> [!IMPORTANT]
+> **The Core Invariant**:
+> In reverse-incremental backups, the **future** is stored in diffs created *after* the snapshot (`diffs/S_{91}/` stores $S_{90}$). The **diff directory of a snapshot** exists solely to protect the **past** ($S_1 \dots S_9$). Therefore, within any compacted interval, only the **earliest diff** preserves the state prior to that interval's modifications.
+
+---
+
+#### Two-Phase Safe Compaction Protocol (With Staging Rollback Journal):
+
+To ensure network drops or crashes never cause data loss, source snapshots are purged **only after** the consolidated snapshot is fully verified and committed. A Write-Ahead Staging Rollback Journal (`.meta/staging/<name>.journal.json`) guarantees crash recovery even across abrupt `SIGKILL` or power failure:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant CLI as incr-backup compact
     participant Staging as .meta/staging/<name>/
+    participant Journal as .meta/staging/<name>.journal.json
     participant Meta as .meta/manifests/
     participant Diffs as diffs/
 
-    CLI->>Staging: 1. Copy required diff files & stage consolidated manifest
-    CLI->>Staging: 2. Verify all staged files and manifest checksums
-    CLI->>Meta: 3. Move verified manifest to .meta/manifests/<name>.json
-    CLI->>Diffs: 4. Move staging diffs folder to diffs/<name>/
-    Note over CLI,Diffs: Consolidated snapshot is now active and valid
-    CLI->>Diffs: 5. Purge original source snapshots and their manifests
+    Note over CLI,Journal: Phase 1: Pre-Log & Staged Move
+    CLI->>Journal: 1. Write rollback journal (maps src diff paths -> staged paths)
+    CLI->>Staging: 2. Server-side move (rclone moveto) kept diff files & stage manifest
+    
+    Note over CLI,Staging: Phase 2: Verification
+    CLI->>Staging: 3. Verify staged manifest and file checksums (MD5)
+    alt Verification Fails or Interrupted
+        CLI->>Diffs: Rollback: Reverse moveto all staged files back to source diffs
+        CLI->>Staging: Clean up staging folder and journal
+    end
+
+    Note over CLI,Diffs: Phase 3: Commit (Point of No Return)
+    CLI->>Meta: 4. Move verified manifest to .meta/manifests/<name>.json
+    CLI->>Diffs: 5. Move staging diffs folder to diffs/<name>/
+    CLI->>Journal: 6. Delete staging journal (Compacted snapshot active!)
+
+    Note over CLI,Diffs: Phase 4: Purge
+    CLI->>Diffs: 7. Purge original source snapshots and their manifests
 ```
 
 #### Timestamp Validation & Dry-Run Visibility:

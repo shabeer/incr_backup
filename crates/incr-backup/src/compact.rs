@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, FixedOffset, Local, Utc};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use rayon::prelude::*;
 use serde::Deserialize;
 
@@ -292,13 +292,12 @@ struct LsjsonFileEntry {
     hashes: Option<HashMap<String, String>>,
 }
 
-/// Build the compaction plan without performing mutations.
-pub fn build_compact_plan(
-    rclone: &Rclone,
-    remote_base: &str,
-    config: &Config,
+/// Validate user-supplied compaction options (name, from, to timestamps and timezone offset)
+/// without performing any remote I/O or acquiring any locks.
+pub fn validate_compact_params(
     options: &CompactOptions,
-) -> Result<CompactPlan> {
+    configured_tz: SnapshotTimezone,
+) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
     // 1. Validate name
     if options.name.is_empty()
         || options.name.contains('/')
@@ -312,8 +311,8 @@ pub fn build_compact_plan(
     }
 
     // 2. Validate timestamps and offsets
-    let from_utc = parse_and_validate_timestamp("--from", &options.from, config.timezone)?;
-    let to_utc = parse_and_validate_timestamp("--to", &options.to, config.timezone)?;
+    let from_utc = parse_and_validate_timestamp("--from", &options.from, configured_tz)?;
+    let to_utc = parse_and_validate_timestamp("--to", &options.to, configured_tz)?;
 
     if from_utc > to_utc {
         return Err(IncrError::CompactionError(
@@ -321,17 +320,39 @@ pub fn build_compact_plan(
         ));
     }
 
-    // 3. Discover snapshots
-    let all_snapshots = discover_all_snapshots(rclone, remote_base)?;
+    Ok((from_utc, to_utc))
+}
+
+/// Build the compaction plan without performing mutations.
+pub fn build_compact_plan(
+    rclone: &Rclone,
+    remote_base: &str,
+    config: &Config,
+    options: &CompactOptions,
+) -> Result<CompactPlan> {
+    let (from_utc, to_utc) = validate_compact_params(options, config.timezone)?;
+    build_compact_plan_with_times(rclone, remote_base, config, options, from_utc, to_utc)
+}
+
+/// Internal plan builder using pre-validated timestamps.
+pub fn build_compact_plan_with_times(
+    rclone: &Rclone,
+    remote_base: &str,
+    _config: &Config,
+    options: &CompactOptions,
+    from_utc: DateTime<Utc>,
+    to_utc: DateTime<Utc>,
+) -> Result<CompactPlan> {
+    // 3. Discover snapshots from catalog (.meta/snapshots.jsonl or fallback .meta/snapshot.jsonl)
+    let all_summaries = crate::catalog::load_snapshot_catalog(rclone, remote_base)?;
 
     // 4. Filter snapshots in range [from_utc, to_utc]
-    let in_range: Vec<SnapshotMeta> = all_snapshots
+    let in_range_summaries: Vec<&crate::catalog::SnapshotSummary> = all_summaries
         .iter()
         .filter(|s| s.created_at >= from_utc && s.created_at <= to_utc)
-        .cloned()
         .collect();
 
-    if in_range.is_empty() {
+    if in_range_summaries.is_empty() {
         return Err(IncrError::NoSnapshotsInRange {
             from: options.from.clone(),
             to: options.to.clone(),
@@ -339,8 +360,8 @@ pub fn build_compact_plan(
     }
 
     // Check if target name conflicts with an existing snapshot outside this range
-    let conflicts = all_snapshots.iter().any(|s| {
-        !in_range.iter().any(|r| r.manifest_name == s.manifest_name)
+    let conflicts = all_summaries.iter().any(|s| {
+        !in_range_summaries.iter().any(|r| r.manifest_name == s.manifest_name)
             && (s.name == options.name || s.manifest_name == format!("{}.json", options.name))
     });
     if conflicts {
@@ -350,34 +371,97 @@ pub fn build_compact_plan(
         )));
     }
 
+    let manifests_dir = format!("{remote_base}/.meta/manifests/");
+
     // 5. Single snapshot case
-    if in_range.len() == 1 {
-        let single = in_range[0].clone();
+    if in_range_summaries.len() == 1 {
+        let single_summary = in_range_summaries[0];
+        let remote_manifest_path = format!("{manifests_dir}{}", single_summary.manifest_name);
+        let content = rclone.cat(&remote_manifest_path)?;
+        let manifest = Manifest::from_json(&content)?;
+
+        let single = SnapshotMeta {
+            name: single_summary.name.clone(),
+            manifest_name: single_summary.manifest_name.clone(),
+            created_at: single_summary.created_at,
+            diff_dir: single_summary.diff_dir.clone(),
+            manifest,
+        };
+
         return Ok(CompactPlan {
             from_str: options.from.clone(),
             to_str: options.to.clone(),
             from_utc,
             to_utc,
             name: options.name.clone(),
-            in_range_snapshots: in_range.clone(),
+            in_range_snapshots: vec![single.clone()],
             anchor_snapshot: single.clone(),
             prev_snapshot: None,
             files_to_keep: Vec::new(),
             files_to_discard: Vec::new(),
-            snapshots_to_purge: in_range,
+            snapshots_to_purge: vec![single],
             is_single: true,
         });
     }
 
     // 6. Multi-snapshot consolidation
-    let anchor = in_range.last().unwrap().clone();
+    let anchor_summary = in_range_summaries.last().unwrap();
+    let anchor_manifest_path = format!("{manifests_dir}{}", anchor_summary.manifest_name);
+    let anchor_content = rclone.cat(&anchor_manifest_path)?;
+    let anchor_manifest = Manifest::from_json(&anchor_content)?;
+
+    let anchor = SnapshotMeta {
+        name: anchor_summary.name.clone(),
+        manifest_name: anchor_summary.manifest_name.clone(),
+        created_at: anchor_summary.created_at,
+        diff_dir: anchor_summary.diff_dir.clone(),
+        manifest: anchor_manifest,
+    };
 
     // Find preceding snapshot (immediately before the range)
-    let before_range: Vec<&SnapshotMeta> = all_snapshots
+    let before_range: Vec<&crate::catalog::SnapshotSummary> = all_summaries
         .iter()
         .filter(|s| s.created_at < from_utc)
         .collect();
-    let prev = before_range.last().cloned().cloned();
+
+    let prev = match before_range.last() {
+        Some(s) => {
+            let prev_manifest_path = format!("{manifests_dir}{}", s.manifest_name);
+            let prev_content = rclone.cat(&prev_manifest_path)?;
+            let prev_manifest = Manifest::from_json(&prev_content)?;
+            Some(SnapshotMeta {
+                name: s.name.clone(),
+                manifest_name: s.manifest_name.clone(),
+                created_at: s.created_at,
+                diff_dir: s.diff_dir.clone(),
+                manifest: prev_manifest,
+            })
+        }
+        None => None,
+    };
+
+    let in_range: Vec<SnapshotMeta> = in_range_summaries
+        .iter()
+        .map(|s| {
+            if s.manifest_name == anchor.manifest_name {
+                anchor.clone()
+            } else {
+                SnapshotMeta {
+                    name: s.name.clone(),
+                    manifest_name: s.manifest_name.clone(),
+                    created_at: s.created_at,
+                    diff_dir: s.diff_dir.clone(),
+                    manifest: Manifest {
+                        snapshot_name: s.name.clone(),
+                        created_at: s.created_at,
+                        file_count: s.file_count,
+                        total_size: s.total_size,
+                        files: Vec::new(),
+                    },
+                }
+            }
+        })
+        .collect();
 
     // Inspect files in diff directories of all in-range snapshots
     // Tuple: (file_path, file_size, file_md5, diff_dir_name, snapshot_name, snap_index)
@@ -663,6 +747,9 @@ pub fn run_compact(
     let start = Instant::now();
     let remote_base = &config.remote_path;
 
+    // Fail-fast: validate --from, --to and name parameters BEFORE acquiring any remote lock
+    let (from_utc, to_utc) = validate_compact_params(options, config.timezone)?;
+
     // Acquire lock
     let lock_mgr = LockManager::new(rclone, remote_base, config.timezone);
     if options.dry_run {
@@ -673,7 +760,7 @@ pub fn run_compact(
     }
 
     // Build plan
-    let plan = match build_compact_plan(rclone, remote_base, config, options) {
+    let plan = match build_compact_plan_with_times(rclone, remote_base, config, options, from_utc, to_utc) {
         Ok(p) => p,
         Err(e) => {
             if !options.dry_run {
@@ -794,10 +881,26 @@ fn execute_compact_plan(
     // ── Multi-Snapshot Consolidation (Two-Phase Safe Protocol) ──────────────
     let staging_dir = format!("{remote_base}/.meta/staging/{}/", plan.name);
     let staging_manifest = format!("{remote_base}/.meta/staging/{}.manifest.json", plan.name);
+    let staging_journal = format!("{remote_base}/.meta/staging/{}.journal.json", plan.name);
     let final_manifest = format!("{remote_base}/.meta/manifests/{}.json", plan.name);
     let final_diff_dir = format!("{remote_base}/diffs/{}", plan.name);
 
-    // Clean up any existing staging from aborted previous runs
+    // Crash Recovery: Rollback any existing staged files from an aborted previous run before cleaning staging
+    if let Ok(journal_content) = rclone.cat(&staging_journal) {
+        if let Ok(entries) = serde_json::from_str::<Vec<(String, String)>>(&journal_content) {
+            warn!(
+                "Found interrupted compaction journal for '{}'. Recovering {} staged files to their source snapshots...",
+                plan.name,
+                entries.len()
+            );
+            for (src, dst) in entries.iter().rev() {
+                let _ = rclone.moveto(dst, src);
+            }
+        }
+        let _ = rclone.delete_file(&staging_journal);
+    }
+
+    // Clean up any remaining empty staging from aborted previous runs
     let _ = rclone.delete(&staging_dir, &[]);
     let _ = rclone.rmdir_specific(&staging_dir);
     let _ = rclone.delete_file(&staging_manifest);
@@ -808,37 +911,99 @@ fn execute_compact_plan(
         plan.name
     );
 
-    // Step 1: Copy kept diff files into staging
+    // Rollback helper to safely move staged files back to their source diff directories
+    let rollback_staged_files = |moved: &[String]| {
+        if !moved.is_empty() {
+            warn!("Rolling back {} moved diff files to their original diff directories...", moved.len());
+            for entry in moved.iter().rev() {
+                if let Some((src, dst)) = entry.split_once('\t') {
+                    let _ = rclone.moveto(dst, src);
+                }
+            }
+        }
+        let _ = rclone.delete_file(&staging_journal);
+        let _ = rclone.delete(&staging_dir, &[]);
+        let _ = rclone.rmdir_specific(&staging_dir);
+        let _ = rclone.delete_file(&staging_manifest);
+    };
+
+    // Pre-record rollback journal on remote before moving files
+    if !plan.files_to_keep.is_empty() {
+        let rollback_log: Vec<(String, String)> = plan
+            .files_to_keep
+            .iter()
+            .map(|f| (
+                format!("{remote_base}/diffs/{}/{}", f.source_diff_dir, f.path),
+                format!("{staging_dir}{}", f.path),
+            ))
+            .collect();
+        if let Ok(json) = serde_json::to_string(&rollback_log) {
+            let _ = rclone.rcat(&staging_journal, &json);
+        }
+    }
+
+    // Step 1: Move kept diff files into staging (server-side move, zero bandwidth)
+    let mut moved_files: Vec<String> = Vec::new();
     if !plan.files_to_keep.is_empty() {
         rclone.mkdir(&staging_dir)?;
         for file in &plan.files_to_keep {
             let src = format!("{remote_base}/diffs/{}/{}", file.source_diff_dir, file.path);
             let dst = format!("{staging_dir}{}", file.path);
-            rclone.copyto(&src, &dst)?;
+            if let Err(e) = rclone.moveto(&src, &dst) {
+                error!("Move to staging failed for '{}' ({e}). Rolling back staged files...", file.path);
+                rollback_staged_files(&moved_files);
+                return Err(e);
+            }
+            moved_files.push(format!("{src}\t{dst}"));
         }
     }
 
     // Step 1b: Create and stage consolidated manifest
     let mut manifest = plan.anchor_snapshot.manifest.clone();
     manifest.snapshot_name = plan.name.clone();
-    let json = manifest.to_json()?;
-    rclone.rcat(&staging_manifest, &json)?;
+    let json = match manifest.to_json() {
+        Ok(j) => j,
+        Err(e) => {
+            rollback_staged_files(&moved_files);
+            return Err(e);
+        }
+    };
+    if let Err(e) = rclone.rcat(&staging_manifest, &json) {
+        rollback_staged_files(&moved_files);
+        return Err(e);
+    }
 
     // Step 2: Verification
     info!("Stage 2: Verifying staged files and manifest...");
-    let staged_json = rclone.cat(&staging_manifest)?;
-    let parsed_manifest = Manifest::from_json(&staged_json)?;
+    let staged_json = match rclone.cat(&staging_manifest) {
+        Ok(s) => s,
+        Err(e) => {
+            rollback_staged_files(&moved_files);
+            return Err(e);
+        }
+    };
+    let parsed_manifest = match Manifest::from_json(&staged_json) {
+        Ok(m) => m,
+        Err(e) => {
+            rollback_staged_files(&moved_files);
+            return Err(e);
+        }
+    };
     if parsed_manifest.files.len() != plan.anchor_snapshot.manifest.files.len() {
-        let _ = rclone.delete(&staging_dir, &[]);
-        let _ = rclone.rmdir_specific(&staging_dir);
-        let _ = rclone.delete_file(&staging_manifest);
+        rollback_staged_files(&moved_files);
         return Err(IncrError::CompactionError(
             "Staged manifest validation failed: file count mismatch".to_string(),
         ));
     }
 
     if !plan.files_to_keep.is_empty() {
-        let staged_lsjson = rclone.lsjson_recursive_hash(&staging_dir)?;
+        let staged_lsjson = match rclone.lsjson_recursive_hash(&staging_dir) {
+            Ok(ls) => ls,
+            Err(e) => {
+                rollback_staged_files(&moved_files);
+                return Err(e);
+            }
+        };
         let staged_entries: Vec<LsjsonFileEntry> =
             serde_json::from_str(&staged_lsjson).unwrap_or_default();
         let staged_map: HashMap<String, String> = staged_entries
@@ -863,9 +1028,7 @@ fn execute_compact_plan(
             match staged_map.get(&file.path) {
                 Some(staged_md5) => {
                     if !file.md5.is_empty() && !staged_md5.is_empty() && file.md5 != *staged_md5 {
-                        let _ = rclone.delete(&staging_dir, &[]);
-                        let _ = rclone.rmdir_specific(&staging_dir);
-                        let _ = rclone.delete_file(&staging_manifest);
+                        rollback_staged_files(&moved_files);
                         return Err(IncrError::CompactionError(format!(
                             "Hash verification failed for staged file '{}'",
                             file.path
@@ -873,9 +1036,7 @@ fn execute_compact_plan(
                     }
                 }
                 None => {
-                    let _ = rclone.delete(&staging_dir, &[]);
-                    let _ = rclone.rmdir_specific(&staging_dir);
-                    let _ = rclone.delete_file(&staging_manifest);
+                    rollback_staged_files(&moved_files);
                     return Err(IncrError::CompactionError(format!(
                         "Verification failed: file '{}' missing from staging directory",
                         file.path
@@ -900,6 +1061,7 @@ fn execute_compact_plan(
     }
 
     // Consolidated snapshot is now fully active!
+    let _ = rclone.delete_file(&staging_journal);
 
     // Step 4: Delete source snapshots and their manifests
     info!(

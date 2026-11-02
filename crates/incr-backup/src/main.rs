@@ -251,13 +251,51 @@ enum Commands {
     },
 
     /// Consolidate multiple snapshots within a date range into a single named snapshot.
+    ///
+    /// Combines intermediate snapshots into a single consolidated snapshot without data loss,
+    /// using reverse-incremental dependency resolution and the earliest-diff rule.
+    ///
+    /// Timestamp arguments (--from and --to) must be in ISO-8601 format with an explicit
+    /// timezone offset matching the configured backup timezone.
+    #[command(
+        after_help = "EXAMPLES:\n  \
+          # Compact snapshots in UTC timezone (matching --timezone utc):\n  \
+          incr-backup compact \\\n    \
+            --from 2026-10-28T00:00:00Z \\\n    \
+            --to 2026-10-28T23:59:59Z \\\n    \
+            --name daily-2026-10-28\n\n  \
+          # Compact snapshots in local timezone (matching --timezone local, e.g. +05:30):\n  \
+          incr-backup compact \\\n    \
+            --from 2026-10-28T00:00:00+05:30 \\\n    \
+            --to 2026-10-28T23:59:59+05:30 \\\n    \
+            --name daily-2026-10-28\n\n  \
+          # Dry-run preview with high-level summary of kept and discarded diffs:\n  \
+          incr-backup compact \\\n    \
+            --from 2026-10-28T00:00:00Z \\\n    \
+            --to 2026-10-28T23:59:59Z \\\n    \
+            --name daily-2026-10-28 \\\n    \
+            --dry-run --summary\n\n  \
+          # Dynamic date substitution for cron / nightly consolidation:\n  \
+          incr-backup compact \\\n    \
+            --from \"$(date -v-1d +%Y-%m-%dT00:00:00%z)\" \\\n    \
+            --to \"$(date -v-1d +%Y-%m-%dT23:59:59%z)\" \\\n    \
+            --name \"daily-$(date -v-1d +%Y-%m-%d)\""
+    )]
     Compact {
-        /// Start of snapshot timestamp range (ISO-8601 with explicit timezone offset).
-        #[arg(long = "from")]
+        /// Start of snapshot timestamp range in ISO-8601 format with explicit timezone offset.
+        #[arg(
+            long = "from",
+            help = "Start of snapshot timestamp range (ISO-8601, e.g. 2026-10-28T00:00:00Z or 2026-10-28T00:00:00+05:30)",
+            long_help = "Start of snapshot timestamp range in ISO-8601 format with explicit timezone offset.\n\nExamples:\n  UTC:   2026-10-28T00:00:00Z or 2026-10-28T00:00:00+00:00\n  Local: 2026-10-28T00:00:00+05:30 or 2026-10-28T00:00:00-08:00"
+        )]
         from: String,
 
-        /// End of snapshot timestamp range (ISO-8601 with explicit timezone offset).
-        #[arg(long = "to")]
+        /// End of snapshot timestamp range in ISO-8601 format with explicit timezone offset.
+        #[arg(
+            long = "to",
+            help = "End of snapshot timestamp range (ISO-8601, e.g. 2026-10-28T23:59:59Z or 2026-10-28T23:59:59+05:30)",
+            long_help = "End of snapshot timestamp range in ISO-8601 format with explicit timezone offset.\n\nExamples:\n  UTC:   2026-10-28T23:59:59Z or 2026-10-28T23:59:59+00:00\n  Local: 2026-10-28T23:59:59+05:30 or 2026-10-28T23:59:59-08:00"
+        )]
         to: String,
 
         /// Name for the consolidated snapshot.
