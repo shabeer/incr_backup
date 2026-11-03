@@ -231,3 +231,102 @@ fn test_gc_empty_remote() {
         .stdout(predicate::str::contains("No orphaned diff directories found"));
 }
 
+#[test]
+fn test_gc_purges_tombstoned_deleted_diff_directories() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str()])
+        .assert()
+        .success();
+
+    // S1: initial
+    env.write_source_file("fileA.txt", b"A v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s1"])
+        .assert()
+        .success();
+
+    // S2: modify A, add B -> diffs/s2
+    env.write_source_file("fileA.txt", b"A v2");
+    env.write_source_file("fileB.txt", b"B v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s2"])
+        .assert()
+        .success();
+
+    // S3: modify B -> diffs/s3
+    env.write_source_file("fileB.txt", b"B v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s3"])
+        .assert()
+        .success();
+
+    let diffs_dir = env.remote_path.join("diffs");
+    assert!(diffs_dir.join("s2").exists());
+    assert!(diffs_dir.join("s3").exists());
+
+    // Prune s2 using remove_snapshots
+    env.command()
+        .args(["remove_snapshots", "--to", "s2", "--remote", &env.remote_str()])
+        .assert()
+        .success();
+
+    // Verify s2 was tombstoned to s2_deleted instead of slow purge
+    assert!(!diffs_dir.join("s2").exists(), "diffs/s2 should be unlinked");
+    assert!(diffs_dir.join("s2_deleted").exists(), "diffs/s2_deleted tombstone must exist");
+
+    // Check status command shows [pending GC]
+    env.command()
+        .args(["status", "--remote", &env.remote_str()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("s2_deleted"))
+        .stdout(predicate::str::contains("[pending GC]"));
+
+    // Check verify check details shows pending GC
+    env.command()
+        .args(["verify", "--remote", &env.remote_str()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pending GC"));
+
+    // Run GC dry run
+    env.command()
+        .args(["gc", "--orphaned-diffs", "--dry-run", "--remote", &env.remote_str()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("diffs/s2_deleted/"));
+
+    assert!(diffs_dir.join("s2_deleted").exists(), "must exist after dry-run");
+
+    // Run actual GC
+    env.command()
+        .args(["gc", "--orphaned-diffs", "--remote", &env.remote_str()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("✓ diffs/s2_deleted/"));
+
+    // Verify tombstone is now physically gone
+    assert!(!diffs_dir.join("s2_deleted").exists(), "diffs/s2_deleted must be permanently wiped");
+
+    // Verify surviving snapshot s3 is still healthy
+    let restore_dir = env.temp_dir.path().join("restore_s3");
+    env.command()
+        .args([
+            "restore",
+            "s3",
+            "--to",
+            &restore_dir.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Verification: PASSED ✓"));
+
+    assert_eq!(std::fs::read_to_string(restore_dir.join("fileA.txt")).unwrap(), "A v2");
+    assert_eq!(std::fs::read_to_string(restore_dir.join("fileB.txt")).unwrap(), "B v2");
+}
+

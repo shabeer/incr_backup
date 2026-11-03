@@ -283,7 +283,12 @@ pub struct SnapshotDiffFiles {
 pub fn find_snapshot_diff_dir(rclone: &Rclone, remote_base: &str, snapshot_name: &str) -> Option<String> {
     let clean_name = snapshot_name.trim_end_matches('/');
     let diffs_dir = format!("{remote_base}/diffs/");
-    let existing_diff_dirs: std::collections::HashSet<String> = rclone.lsd(&diffs_dir).ok()?.into_iter().collect();
+    let existing_diff_dirs: std::collections::HashSet<String> = rclone
+        .lsd(&diffs_dir)
+        .ok()?
+        .into_iter()
+        .filter(|d| !crate::snapshot::is_tombstone_diff_dir(d))
+        .collect();
     if existing_diff_dirs.contains(clean_name) {
         return Some(clean_name.to_string());
     }

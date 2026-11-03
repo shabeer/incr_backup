@@ -8,6 +8,14 @@ use chrono::Utc;
 
 use crate::config::SnapshotTimezone;
 
+/// Suffix used to tombstone diff directories pending physical deletion via GC.
+pub const DELETED_SUFFIX: &str = "_deleted";
+
+/// Check if a directory name represents a tombstoned diff directory.
+pub fn is_tombstone_diff_dir(dir_name: &str) -> bool {
+    dir_name.trim_matches('/').ends_with(DELETED_SUFFIX)
+}
+
 /// Generate a formatted snapshot name for a new backup run.
 ///
 /// Uses the configured timezone to produce standard snapshot directory names,
@@ -111,5 +119,15 @@ mod tests {
         // Display format with colons and Z
         let dt_colon_z = parse_snapshot_timestamp("2026-10-28T08:00Z").unwrap();
         assert_eq!(dt_colon_z.hour(), 8);
+    }
+
+    #[test]
+    fn test_is_tombstone_diff_dir() {
+        assert!(is_tombstone_diff_dir("2026-10-28T08-00Z_deleted"));
+        assert!(is_tombstone_diff_dir("2026-10-28T08-00Z_deleted/"));
+        assert!(is_tombstone_diff_dir("snap1_deleted"));
+        assert!(!is_tombstone_diff_dir("2026-10-28T08-00Z"));
+        assert!(!is_tombstone_diff_dir("2026-10-28T08-00Z/"));
+        assert!(!is_tombstone_diff_dir("snap1"));
     }
 }

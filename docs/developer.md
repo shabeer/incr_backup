@@ -31,6 +31,8 @@
    - [remove_snapshots: Pruning Past Snapshots by Timestamp](#removesnapshots-pruning-past-snapshots-by-timestamp)
      - [Understanding CLI Output: "Deleted Snapshots" vs. "Purged Diff Directories"](#understanding-cli-output-deleted-snapshots-vs-purged-diff-directories)
    - [gc: Garbage Collection & Orphaned Diff Pruning](#gc-garbage-collection--orphaned-diff-pruning)
+     - [Fast Tombstoning (_deleted) & Deferred Physical Cleanup](#fast-tombstoning-_deleted--deferred-physical-cleanup)
+     - [Detailed Analysis, Pros & Cons](#detailed-analysis-pros--cons)
    - [config: synchronizing local & remote metadata](#config-synchronizing-local--remote-metadata)
 5. [Crash Recovery: Write-Ahead Journal (WAL)](#5-crash-recovery-write-ahead-journal-wal)
 6. [Advisory Locking & Concurrency](#6-advisory-locking--concurrency)
@@ -1002,6 +1004,70 @@ incr-backup gc --orphaned-diffs --json
 # Break stale lock if another process died
 incr-backup gc --orphaned-diffs --force
 ```
+
+#### Fast Tombstoning (`_deleted`) & Deferred Physical Cleanup
+
+In previous releases, operations affecting `diffs/`—specifically **Stage 4 of `compact`** and **Step 7 of `remove_snapshots`**—attempted synchronous physical deletion of obsolete diff directories using `rclone purge` or `rclone delete` + `rclone rmdir_specific`.
+
+##### The Problem with Foreground Synchronous Purging:
+1. **High Latency & Blocking Times**: On cloud remotes like Google Drive, deleting a large diff directory with thousands of files involves traversing every file and sending recursive trash/delete requests, which takes tens of seconds or minutes. Users were forced to wait while holding the cloud advisory lock.
+2. **API Rate Limiting**: Heavy file-by-file deletions frequently encounter rate-limit throttles (e.g., Google Drive's 10 req/s quota).
+3. **Non-Atomic Partial Failures**: If an operation was interrupted or rate-limited midway through purging, the diff directory was left in a half-deleted state on the remote.
+4. **`rmdirs` Fallback Friction**: Fallback commands required retry loops (`MAX_PURGE_FAILURES`) and manual warning messages when directory leaves could not be pruned.
+
+##### The Solution: Atomic In-Place Tombstoning
+Instead of synchronously deleting files during interactive operations, `compact` and `remove_snapshots` perform an immediate, atomic server-side directory rename:
+```text
+diffs/<timestamp>/  ──(rclone moveto)──>  diffs/<timestamp>_deleted/
+```
+
+1. **Foreground Operation (`compact` / `remove_snapshots`)**:
+   - Immediately executes `rclone moveto diffs/<dir> diffs/<dir>_deleted`.
+   - On hierarchical remotes (Google Drive, Local, SFTP), this is a single $O(1)$ metadata PATCH operation that completes in ~100–300 ms, regardless of file count.
+   - The directory is instantly unlinked from active snapshots, and foreground commands finish almost immediately.
+2. **Background / Scheduled Operation (`gc --orphaned-diffs`)**:
+   - Discovers all `*_deleted` tombstones (alongside any unreferenced orphan folders).
+   - Performs the slower, batch physical file deletion (`rclone delete + rmdirs` or `purge`) in a dedicated maintenance window.
+
+---
+
+#### Detailed Analysis, Pros & Cons
+
+##### Remote Storage Characteristics (Hierarchical vs. Flat Object Stores)
+Understanding how different cloud backends implement directory operations is essential when evaluating tombstoning:
+
+| Storage Type | Examples | Directory Rename (`moveto`) Behavior | Purge (`purge`) Behavior | Recommendation |
+| :--- | :--- | :--- | :--- | :--- |
+| **Hierarchical Storage** | Google Drive, Local Filesystem, SFTP, OneDrive, Box | **$O(1)$ Metadata Rename**: Single API call (`update(folder_id, title)`). Instantaneous (~100–300ms) even for 100k files. | **$O(N)$ Recursive Deletion**: Traverses every file; vulnerable to 10 req/s API quotas. | **Tombstoning (`_deleted`) is a massive speedup.** |
+| **Flat Object Stores** | AWS S3, Cloudflare R2, Backblaze B2, Google Cloud Storage, Wasabi, MinIO | **No real directories**: Keys are just strings. `rclone moveto` on a prefix emulates rename by issuing `CopyObject` + `DeleteObject` for *every single file*. | **Fast Multi-Object Delete**: S3 `DeleteObjects` API deletes up to 1,000 objects per API call without copying any data. | **Direct purge / GC batch delete is preferred over rename.** |
+
+##### Command Isolation & Invariants
+All subsystems that inspect `diffs/` are guarded to exclude `*_deleted` directories:
+* **`catalog.rs` (`rebuild_snapshot_catalog` / `remove_from_catalog`)**:
+  - Filters out `is_tombstone_diff_dir(dir)` so active snapshots in `.meta/snapshots.jsonl` are never matched to a tombstone.
+  - Automatically clears `diff_dir = None` when a tombstone is swept.
+* **`compact.rs` (`discover_all_snapshots`)**:
+  - Ignores `*_deleted` directories during range calculation and file consolidation planning.
+* **`remove.rs` (`remove --files` / `remove_snapshots`)**:
+  - Skips scanning `*_deleted` directories during file searches, avoiding wasted API calls.
+  - Safely renames surviving baseline diff directories to `*_deleted`.
+* **`restore.rs` (`find_snapshot_diff_dir`)**:
+  - Ignores `*_deleted` folders to guarantee a restore never references pending deletions.
+* **`verify.rs` (`check_manifest_consistency` & `check_diff_dirs`)**:
+  - Counts active diff directories accurately and explicitly reports pending tombstones (e.g. `12 active diff directories found (2 pending GC)`).
+* **`status` (`main.rs`)**:
+  - Labels tombstoned directories explicitly in the CLI output with `[pending GC]` alongside file count and size.
+* **`gc.rs` (`run_gc_inner`)**:
+  - Explicitly targets any directory ending in `_deleted` for physical destruction, removing files and deleting empty directory leaves.
+
+##### Pros & Cons Matrix
+
+| Dimension | Pros | Cons / Mitigations |
+| :--- | :--- | :--- |
+| **Execution Speed** | Compaction Stage 4 and snapshot removal finish in sub-second time instead of minutes. Cloud lock hold times are minimized. | Does not physically free remote disk quota until `gc` runs. *(Mitigated by clear `[pending GC]` indicators in `status` and `verify`).* |
+| **Crash Consistency** | Moving a directory to `_deleted` is atomic. If the process is killed midway, the active snapshot set remains intact with no half-deleted trees. | If an interrupted run left a `_deleted` folder, rerunning `moveto` could fail if target exists. *(Mitigated with fallback to `delete + rmdirs`).* |
+| **API Quota & Costs** | Spreads heavy I/O deletions to maintenance windows rather than hitting API limits during regular backup or compaction runs. | Users on tight storage quotas (e.g. free 15 GB Google Drive) must remember to run `gc` to reclaim physical space. |
+| **Namespace Cleanliness** | Simple naming convention (`<snap>_deleted`) contained within `diffs/`; no new root directories created. | Slightly clutters `diffs/` until garbage collection runs. |
 
 ---
 

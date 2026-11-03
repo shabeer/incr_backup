@@ -197,11 +197,17 @@ fn run_gc_inner(config: &Config, rclone: &Rclone, options: &GcOptions) -> Result
         }
     }
 
-    // 5. Identify orphaned diff directories
+    // 5. Identify orphaned and tombstoned diff directories
     let mut orphaned_dir_names: Vec<String> = Vec::new();
     for dir in existing_diff_dirs {
         let clean = dir.trim_matches('/').to_string();
         if clean.is_empty() {
+            continue;
+        }
+
+        // Tombstoned directories (_deleted) are immediately slated for physical deletion
+        if crate::snapshot::is_tombstone_diff_dir(&clean) {
+            orphaned_dir_names.push(clean);
             continue;
         }
 
@@ -260,12 +266,12 @@ fn run_gc_inner(config: &Config, rclone: &Rclone, options: &GcOptions) -> Result
         });
     }
 
-    // 8. Delete orphaned diff directories on remote
+    // 8. Delete orphaned and tombstoned diff directories on remote
     for item in &orphaned_info {
         let diff_path = format!("{remote_clean}/diffs/{}", item.dir_name);
-        info!("Deleting files in orphaned diff directory {}", diff_path);
+        info!("Deleting files in orphaned/tombstoned diff directory {}", diff_path);
         if let Err(e) = rclone.delete(&diff_path, &[]) {
-            warn!("Failed to delete files in orphaned diff directory {}: {}", diff_path, e);
+            warn!("Failed to delete files in orphaned/tombstoned diff directory {}: {}", diff_path, e);
         }
         if let Err(e) = rclone.rmdir_specific(&diff_path) {
             warn!(

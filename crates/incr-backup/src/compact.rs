@@ -211,7 +211,10 @@ pub fn discover_all_snapshots(rclone: &Rclone, remote_base: &str) -> Result<Vec<
     };
 
     let existing_diff_dirs: HashSet<String> = match rclone.lsd(&diffs_dir) {
-        Ok(dirs) => dirs.into_iter().collect(),
+        Ok(dirs) => dirs
+            .into_iter()
+            .filter(|d| !crate::snapshot::is_tombstone_diff_dir(d))
+            .collect(),
         Err(_) => HashSet::new(),
     };
 
@@ -1172,46 +1175,25 @@ fn execute_compact_plan(
     // Consolidated snapshot is now fully active!
     let _ = rclone.delete_file(&staging_journal);
 
-    // Step 4: Delete source snapshots and their manifests
+    // Step 4: Delete source snapshots manifests and tombstone their diffs
     info!(
-        "Stage 4: Deleting {} source snapshots...",
+        "Stage 4: Tombstoning diffs for {} source snapshots...",
         plan.snapshots_to_purge.len()
     );
-    let mut purge_failures: usize = 0;
-    const MAX_PURGE_FAILURES: usize = 2;
 
     for snap in &plan.snapshots_to_purge {
         if let Some(ref dir) = snap.diff_dir {
-            let old_diff = format!("{remote_base}/diffs/{dir}");
-            let mut purged = false;
-
-            if purge_failures <= MAX_PURGE_FAILURES {
-                match rclone.purge(&old_diff) {
-                    Ok(_) => {
-                        purged = true;
-                    }
-                    Err(e) => {
-                        purge_failures += 1;
-                        warn!(
-                            "rclone purge failed for '{}' ({e}). Falling back to delete + rmdir_specific...",
-                            old_diff
-                        );
-                        if purge_failures > MAX_PURGE_FAILURES {
-                            warn!(
-                                "Too many purge failures ({purge_failures} > {MAX_PURGE_FAILURES}). Disabling rclone purge for remaining snapshots."
-                            );
-                        }
-                    }
-                }
-            }
-
-            if !purged {
-                let _ = rclone.delete(&old_diff, &[]);
-                if let Err(e) = rclone.rmdir_specific(&old_diff) {
+            let clean_dir = dir.trim_matches('/');
+            if !crate::snapshot::is_tombstone_diff_dir(clean_dir) {
+                let old_diff = format!("{remote_base}/diffs/{clean_dir}");
+                let tombstone = format!("{remote_base}/diffs/{clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
+                info!("Renaming obsolete diff directory {clean_dir} -> {clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
+                if let Err(e) = rclone.moveto(&old_diff, &tombstone) {
                     warn!(
-                        "[WARN] Could not remove empty diff directory '{}' ({e}). Please manually remove it if needed: rclone rmdirs \"{}\"",
-                        old_diff, old_diff
+                        "Failed to rename diffs/{clean_dir} to tombstone ({e}). Falling back to delete + rmdir_specific..."
                     );
+                    let _ = rclone.delete(&old_diff, &[]);
+                    let _ = rclone.rmdir_specific(&old_diff);
                 }
             }
         }

@@ -394,7 +394,10 @@ fn check_snapshot_ordering(_rclone: &Rclone, _remote_base: &str) -> VerifyCheck 
 fn check_manifest_consistency(rclone: &Rclone, remote_base: &str) -> VerifyCheck {
     let diffs_path = format!("{}/diffs/", remote_base);
     let diffs_dirs = match rclone.lsd(&diffs_path) {
-        Ok(dirs) => dirs,
+        Ok(dirs) => dirs
+            .into_iter()
+            .filter(|d| !crate::snapshot::is_tombstone_diff_dir(d))
+            .collect(),
         Err(_) => Vec::new(),
     };
 
@@ -468,11 +471,21 @@ fn check_diff_dirs(rclone: &Rclone, remote_base: &str) -> VerifyCheck {
     let diffs_path = format!("{}/diffs/", remote_base);
     match rclone.lsd(&diffs_path) {
         Ok(dirs) => {
+            let active_count = dirs
+                .iter()
+                .filter(|d| !crate::snapshot::is_tombstone_diff_dir(d))
+                .count();
+            let tombstone_count = dirs.len() - active_count;
+            let details = if tombstone_count > 0 {
+                format!("{active_count} diff directories found ({tombstone_count} pending GC)")
+            } else {
+                format!("{active_count} diff directories found")
+            };
             VerifyCheck {
                 number: 9,
                 name: "Diff directories".to_string(),
                 status: CheckStatus::Passed,
-                details: format!("{} diff directories found", dirs.len()),
+                details,
             }
         }
         Err(_) => VerifyCheck {
@@ -562,7 +575,10 @@ fn compute_space_report(rclone: &Rclone, remote_base: &str) -> Result<SpaceRepor
         report.diffs_files = size.count;
     }
     if let Ok(dirs) = rclone.lsd(&format!("{}/diffs/", remote_base)) {
-        report.diffs_count = dirs.len() as u32;
+        report.diffs_count = dirs
+            .iter()
+            .filter(|d| !crate::snapshot::is_tombstone_diff_dir(d))
+            .count() as u32;
     }
 
     // .meta/ size

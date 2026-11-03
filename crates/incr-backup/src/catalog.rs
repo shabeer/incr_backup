@@ -110,7 +110,10 @@ pub fn rebuild_snapshot_catalog(
     };
 
     let existing_diff_dirs: HashSet<String> = match rclone.lsd(&diffs_dir) {
-        Ok(dirs) => dirs.into_iter().collect(),
+        Ok(dirs) => dirs
+            .into_iter()
+            .filter(|d| !crate::snapshot::is_tombstone_diff_dir(d))
+            .collect(),
         Err(_) => HashSet::new(),
     };
 
@@ -282,7 +285,10 @@ pub fn remove_from_catalog(
                         && !names_to_remove.contains(stem)
                     {
                         if let Some(ref d) = item.diff_dir {
-                            if purged_diff_dirs.contains(d) {
+                            if purged_diff_dirs.contains(d)
+                                || purged_diff_dirs.contains(d.trim_end_matches(crate::snapshot::DELETED_SUFFIX))
+                                || purged_diff_dirs.contains(&format!("{}{}", d, crate::snapshot::DELETED_SUFFIX))
+                            {
                                 item.diff_dir = None;
                             }
                         }
@@ -302,7 +308,10 @@ pub fn remove_from_catalog(
             });
             for item in &mut list {
                 if let Some(ref d) = item.diff_dir {
-                    if purged_diff_dirs.contains(d) {
+                    if purged_diff_dirs.contains(d)
+                        || purged_diff_dirs.contains(d.trim_end_matches(crate::snapshot::DELETED_SUFFIX))
+                        || purged_diff_dirs.contains(&format!("{}{}", d, crate::snapshot::DELETED_SUFFIX))
+                    {
                         item.diff_dir = None;
                     }
                 }

@@ -392,7 +392,7 @@ fn run_remove_inner(
     // 4b. Delete matching files from all diffs/*/ directories (file-level deletion)
     let diffs_base = format!("{remote_base}/diffs/");
     if let Ok(diff_dirs) = rclone.lsd(&diffs_base) {
-        for diff_dir in diff_dirs {
+        for diff_dir in diff_dirs.into_iter().filter(|d| !crate::snapshot::is_tombstone_diff_dir(d)) {
             let diff_snap_path = format!("{remote_base}/diffs/{diff_dir}");
             debug!("Purging matching files from {}", diff_snap_path);
             rclone.delete(&diff_snap_path, &includes)?;
@@ -505,7 +505,12 @@ fn run_remove_snapshots_inner(
     let mut diff_dirs_to_purge = Vec::new();
 
     let diffs_base = format!("{remote_clean}/diffs");
-    let existing_diff_dirs: HashSet<String> = rclone.lsd(&diffs_base).unwrap_or_default().into_iter().collect();
+    let existing_diff_dirs: HashSet<String> = rclone
+        .lsd(&diffs_base)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|d| !crate::snapshot::is_tombstone_diff_dir(d))
+        .collect();
 
     let resolve_diff_dirs_for_snap = |snap: &crate::catalog::SnapshotSummary| -> Vec<String> {
         let mut found = Vec::new();
@@ -614,19 +619,25 @@ fn run_remove_snapshots_inner(
         });
     }
 
-    // Step 7: Delete physical diff directories on remote
+    // Step 7: Rename physical diff directories on remote to tombstone for later GC
     for dir in &diff_dirs_to_purge {
         let clean_dir = dir.trim_matches('/');
-        let diff_path = format!("{remote_clean}/diffs/{clean_dir}");
-        info!("Deleting files in diff directory {}", diff_path);
-        if let Err(e) = rclone.delete(&diff_path, &[]) {
-            warn!("Failed to delete files in diff directory {}: {}", diff_path, e);
-        }
-        if let Err(e) = rclone.rmdir_specific(&diff_path) {
-            warn!(
-                "[WARN] Could not remove empty diff directory '{}' ({e}). Please manually remove it if needed: rclone rmdirs \"{}\"",
-                diff_path, diff_path
-            );
+        if !crate::snapshot::is_tombstone_diff_dir(clean_dir) {
+            let diff_path = format!("{remote_clean}/diffs/{clean_dir}");
+            let tombstone_path = format!("{remote_clean}/diffs/{clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
+            info!("Renaming diff directory to tombstone: {clean_dir} -> {clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
+            if let Err(e) = rclone.moveto(&diff_path, &tombstone_path) {
+                warn!("Failed to rename diff directory {clean_dir} to tombstone ({e}). Falling back to delete...");
+                if let Err(e2) = rclone.delete(&diff_path, &[]) {
+                    warn!("Failed to delete files in diff directory {}: {}", diff_path, e2);
+                }
+                if let Err(e2) = rclone.rmdir_specific(&diff_path) {
+                    warn!(
+                        "[WARN] Could not remove empty diff directory '{}' ({e2}). Please manually remove it if needed: rclone rmdirs \"{}\"",
+                        diff_path, diff_path
+                    );
+                }
+            }
         }
     }
 

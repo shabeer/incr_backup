@@ -1113,7 +1113,12 @@ fn cmd_status(config: Config) -> incr_backup::error::Result<()> {
 
         for (dir, size_res) in dir_sizes {
             if let Ok(size) = size_res {
-                println!("  {}: {} files, {}", dir, size.count, format_size(size.bytes));
+                let tag = if incr_backup::snapshot::is_tombstone_diff_dir(&dir) {
+                    " [pending GC]"
+                } else {
+                    ""
+                };
+                println!("  {}: {} files, {}{tag}", dir, size.count, format_size(size.bytes));
             }
         }
     }
