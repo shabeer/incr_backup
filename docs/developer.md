@@ -634,6 +634,46 @@ Suppose instead we kept the latest diff in the range ($v_{89}$) and discarded $v
 > **The Core Invariant**:
 > In reverse-incremental backups, the **future** is stored in diffs created *after* the snapshot (`diffs/S_{91}/` stores $S_{90}$). The **diff directory of a snapshot** exists solely to protect the **past** ($S_1 \dots S_9$). Therefore, within any compacted interval, only the **earliest diff** preserves the state prior to that interval's modifications.
 
+#### Timestamp Resolution of Consolidated Snapshots ($S_{\text{compact}}$: Start vs. End Timestamp)
+
+When compacting a range of snapshots (e.g. $S_{10} \dots S_{90}$) into a single consolidated snapshot $S_{\text{compact}}$, what should its `created_at` timestamp be? Should it inherit the timestamp of $S_{10}$ (range start) or $S_{90}$ (range end)?
+
+> [!IMPORTANT]
+> **The Timestamp Invariant**:
+> $S_{\text{compact}}$ **MUST inherit the timestamp of $S_{90}$** (the newest/anchor snapshot in the range, $T_{\text{end}}$), and **NEVER $S_{10}$** ($T_{\text{start}}$).
+
+##### 1. Data Semantic Accuracy (Adopted File State)
+- The consolidated manifest adopts the complete file tree and checksums of **$S_{90}$** (the anchor snapshot at time $T_{90}$, such as file revision $v_{90}$).
+- If $S_{\text{compact}}$ were stamped with the timestamp of $S_{10}$ ($T_{10}$), the metadata would falsely claim that version $v_{90}$ existed at time $T_{10}$, before those changes were ever made. Stamping with $T_{90}$ preserves factual historical accuracy.
+
+##### 2. The Reverse-Incremental Restore Traversal Invariant
+In reverse-incremental backups, restoring any snapshot $S_T$ requires searching backward from `current/` through diff directories created **AFTER** $T$:
+
+$$\text{Diff directories searched} = \{ D_k \mid \text{timestamp}(D_k) > T \}$$
+
+- **When $S_{\text{compact}}$ is stamped with $T_{90}$ (Correct)**:
+  - **Restoring $S_{\text{compact}}$**: The engine searches diffs created *after* $T_{90}$ ($\{ S_{91}, S_{92}, \dots, S_{100} \}$). It finds $v_{90}$ in `diffs/S_{91}/` and restores $S_{\text{compact}}$ with 100% fidelity.
+  - **Restoring pre-range past snapshot $S_9$ (time $T_9$)**: The engine searches diffs created *after* $T_9$. Since $T_{\text{compact}} = T_{90} > T_9$, the engine includes $\text{diffs}/S_{\text{compact}}$ in the search path. It finds $v_9$ (preserved by the Earliest-Diff Rule) and restores $S_9$ with 100% fidelity.
+- **If $S_{\text{compact}}$ were stamped with $T_{10}$ (Flawed)**:
+  - The restore engine would search diffs created after $T_{10}$ expecting to reconstruct the state as of $T_{10}$ ($v_{10}$), but $S_{\text{compact}}$'s manifest lists $v_{90}$. Checksum verification fails immediately, breaking the restore.
+
+##### 3. Monotonic Chaining & Recursive Compaction
+Compaction is designed to be composable and recursive:
+- **Hourly $\rightarrow$ Daily**: Compacting 24 hourly snapshots $[00:00 \dots 23:00]$ produces `daily-YYYY-MM-DD`. Stamping it with **23:00** correctly identifies it as the **end-of-day** state.
+- **Daily $\rightarrow$ Weekly**: Compacting 7 daily snapshots $[\text{Mon} \dots \text{Sun}]$ produces `weekly-YYYY-Wxx`. Stamping it with **Sunday 23:00** correctly identifies it as the **end-of-week** state.
+
+Inheriting the anchor timestamp guarantees a strictly increasing, monotonic chronological sequence:
+$$\text{Past} < T_{\text{Day 1}} < T_{\text{Day 2}} < \dots < T_{\text{Day 7}} < \text{Future}$$
+
+This ensures date range queries (`--from`, `--to`), chronological sorting in `incr-backup list`, and binary searches in `.meta/snapshots.jsonl` remain deterministic and consistent.
+
+##### Summary Resolution Table
+
+| Component | Selected Source | Reason |
+| :--- | :--- | :--- |
+| **`manifest.created_at` (Timestamp)** | **$S_{90}$** (Latest / Anchor) | Represents the actual point in time of the adopted file tree; satisfies the restore traversal algorithm and maintains chronological ordering. |
+| **`diffs/S_compact/` (Physical Diffs)** | **$v_9$** (from $S_{10}$, Earliest) | Satisfies the Earliest-Diff Rule to preserve pre-range restores ($S_1 \dots S_9$). |
+
 ---
 
 #### Two-Phase Safe Compaction Protocol (With Staging Rollback Journal):
@@ -682,46 +722,6 @@ sequenceDiagram
   incr-backup compact --from <START> --to <END> --name <NAME> --dry-run --full-list
   ```
 * **Recursive Uniform Format**: A consolidated snapshot uses the exact same manifest format and directory layout as regular snapshots. You can compact hourly snapshots into daily snapshots, and later compact those daily snapshots into monthly snapshots.
-
-#### Timestamp Resolution of Consolidated Snapshots ($S_{\text{compact}}$: Start vs. End Timestamp)
-
-When compacting a range of snapshots (e.g. $S_{10} \dots S_{90}$) into a single consolidated snapshot $S_{\text{compact}}$, what should its `created_at` timestamp be? Should it inherit the timestamp of $S_{10}$ (range start) or $S_{90}$ (range end)?
-
-> [!IMPORTANT]
-> **The Timestamp Invariant**:
-> $S_{\text{compact}}$ **MUST inherit the timestamp of $S_{90}$** (the newest/anchor snapshot in the range, $T_{\text{end}}$), and **NEVER $S_{10}$** ($T_{\text{start}}$).
-
-##### 1. Data Semantic Accuracy (Adopted File State)
-- The consolidated manifest adopts the complete file tree and checksums of **$S_{90}$** (the anchor snapshot at time $T_{90}$, such as file revision $v_{90}$).
-- If $S_{\text{compact}}$ were stamped with the timestamp of $S_{10}$ ($T_{10}$), the metadata would falsely claim that version $v_{90}$ existed at time $T_{10}$, before those changes were ever made. Stamping with $T_{90}$ preserves factual historical accuracy.
-
-##### 2. The Reverse-Incremental Restore Traversal Invariant
-In reverse-incremental backups, restoring any snapshot $S_T$ requires searching backward from `current/` through diff directories created **AFTER** $T$:
-
-$$\text{Diff directories searched} = \{ D_k \mid \text{timestamp}(D_k) > T \}$$
-
-- **When $S_{\text{compact}}$ is stamped with $T_{90}$ (Correct)**:
-  - **Restoring $S_{\text{compact}}$**: The engine searches diffs created *after* $T_{90}$ ($\{ S_{91}, S_{92}, \dots, S_{100} \}$). It finds $v_{90}$ in `diffs/S_{91}/` and restores $S_{\text{compact}}$ with 100% fidelity.
-  - **Restoring pre-range past snapshot $S_9$ (time $T_9$)**: The engine searches diffs created *after* $T_9$. Since $T_{\text{compact}} = T_{90} > T_9$, the engine includes $\text{diffs}/S_{\text{compact}}$ in the search path. It finds $v_9$ (preserved by the Earliest-Diff Rule) and restores $S_9$ with 100% fidelity.
-- **If $S_{\text{compact}}$ were stamped with $T_{10}$ (Flawed)**:
-  - The restore engine would search diffs created after $T_{10}$ expecting to reconstruct the state as of $T_{10}$ ($v_{10}$), but $S_{\text{compact}}$'s manifest lists $v_{90}$. Checksum verification fails immediately, breaking the restore.
-
-##### 3. Monotonic Chaining & Recursive Compaction
-Compaction is designed to be composable and recursive:
-- **Hourly $\rightarrow$ Daily**: Compacting 24 hourly snapshots $[00:00 \dots 23:00]$ produces `daily-YYYY-MM-DD`. Stamping it with **23:00** correctly identifies it as the **end-of-day** state.
-- **Daily $\rightarrow$ Weekly**: Compacting 7 daily snapshots $[\text{Mon} \dots \text{Sun}]$ produces `weekly-YYYY-Wxx`. Stamping it with **Sunday 23:00** correctly identifies it as the **end-of-week** state.
-
-Inheriting the anchor timestamp guarantees a strictly increasing, monotonic chronological sequence:
-$$\text{Past} < T_{\text{Day 1}} < T_{\text{Day 2}} < \dots < T_{\text{Day 7}} < \text{Future}$$
-
-This ensures date range queries (`--from`, `--to`), chronological sorting in `incr-backup list`, and binary searches in `.meta/snapshots.jsonl` remain deterministic and consistent.
-
-##### Summary Resolution Table
-
-| Component | Selected Source | Reason |
-| :--- | :--- | :--- |
-| **`manifest.created_at` (Timestamp)** | **$S_{90}$** (Latest / Anchor) | Represents the actual point in time of the adopted file tree; satisfies the restore traversal algorithm and maintains chronological ordering. |
-| **`diffs/S_compact/` (Physical Diffs)** | **$v_9$** (from $S_{10}$, Earliest) | Satisfies the Earliest-Diff Rule to preserve pre-range restores ($S_1 \dots S_9$). |
 
 ---
 
