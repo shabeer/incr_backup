@@ -820,3 +820,98 @@ fn test_compact_recovers_from_interrupted_staging_journal() {
     assert!(env.remote_path.join("diffs/daily-rec/doc.txt").exists());
     assert!(!journal_file.exists(), "journal file must be cleaned up on commit");
 }
+
+#[test]
+fn test_compact_batch_moves_and_purge_integrity() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    // Snapshot 0: baseline with multiple files and nested directories
+    env.write_source_file("f1.txt", b"f1_v0");
+    env.write_source_file("f2.txt", b"f2_v0");
+    env.write_source_file("sub/f3.txt", b"f3_v0");
+    env.write_source_file("sub/f4.txt", b"f4_v0");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap0"])
+        .assert()
+        .success();
+
+    // Snapshot 1: modify f1, f3
+    env.write_source_file("f1.txt", b"f1_v1");
+    env.write_source_file("sub/f3.txt", b"f3_v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap1"])
+        .assert()
+        .success();
+
+    // Snapshot 2: modify f2, f4
+    env.write_source_file("f2.txt", b"f2_v2");
+    env.write_source_file("sub/f4.txt", b"f4_v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "snap2"])
+        .assert()
+        .success();
+
+    // Read timestamps from catalog
+    let catalog_content = fs::read_to_string(env.remote_path.join(".meta/snapshots.jsonl")).unwrap();
+    let summaries: Vec<serde_json::Value> = catalog_content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let t_snap1 = summaries.iter().find(|s| s["name"] == "snap1").unwrap()["created_at"].as_str().unwrap();
+    let t_snap2 = summaries.iter().find(|s| s["name"] == "snap2").unwrap()["created_at"].as_str().unwrap();
+
+    // Run compact across snap1 and snap2
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            t_snap1,
+            "--to",
+            t_snap2,
+            "--name",
+            "consolidated-batch",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("✓ Compaction complete: consolidated-batch"));
+
+    // Check that source snapshot diff directories were purged
+    assert!(!env.remote_path.join("diffs/snap1").exists(), "diffs/snap1 must be purged");
+    assert!(!env.remote_path.join("diffs/snap2").exists(), "diffs/snap2 must be purged");
+
+    // Check that consolidated diff contains kept versions needed by snap0
+    let consolidated_diff = env.remote_path.join("diffs/consolidated-batch");
+    assert!(consolidated_diff.exists(), "consolidated diff dir must exist");
+    assert_eq!(fs::read(consolidated_diff.join("f1.txt")).unwrap(), b"f1_v0");
+    assert_eq!(fs::read(consolidated_diff.join("f2.txt")).unwrap(), b"f2_v0");
+    assert_eq!(fs::read(consolidated_diff.join("sub/f3.txt")).unwrap(), b"f3_v0");
+    assert_eq!(fs::read(consolidated_diff.join("sub/f4.txt")).unwrap(), b"f4_v0");
+
+    // Point-in-time restore of snap0 must succeed and match exact baseline contents
+    let restore_dir = env.temp_dir.path().join("restore_snap0");
+    env.command()
+        .args([
+            "restore",
+            "snap0",
+            "--to",
+            &restore_dir.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_dir.join("f1.txt")).unwrap(), b"f1_v0");
+    assert_eq!(fs::read(restore_dir.join("f2.txt")).unwrap(), b"f2_v0");
+    assert_eq!(fs::read(restore_dir.join("sub/f3.txt")).unwrap(), b"f3_v0");
+    assert_eq!(fs::read(restore_dir.join("sub/f4.txt")).unwrap(), b"f4_v0");
+}

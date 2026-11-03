@@ -476,34 +476,97 @@ pub fn build_compact_plan_with_times(
 
     let mut diff_files: Vec<RawDiffFile> = Vec::new();
 
-    for (idx, snap) in in_range.iter().enumerate() {
-        if let Some(ref dir) = snap.diff_dir {
-            let diff_path = format!("{remote_base}/diffs/{dir}/");
-            if let Ok(lsjson) = rclone.lsjson_recursive_hash(&diff_path) {
+    // Map each in-range diff directory to its (snapshot_name, snapshot_index)
+    let in_range_diff_dirs: HashMap<String, (String, usize)> = in_range
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, snap)| {
+            snap.diff_dir
+                .as_ref()
+                .map(|dir| (dir.clone(), (snap.name.clone(), idx)))
+        })
+        .collect();
+
+    if !in_range_diff_dirs.is_empty() {
+        let diffs_root = format!("{remote_base}/diffs");
+        let include_patterns: Vec<String> = in_range_diff_dirs
+            .keys()
+            .map(|dir| format!("/{dir}/**"))
+            .collect();
+
+        let batch_scanned = match rclone.lsjson_filtered(&diffs_root, true, true, &include_patterns) {
+            Ok(lsjson) => {
                 if let Ok(entries) = serde_json::from_str::<Vec<LsjsonFileEntry>>(&lsjson) {
                     for entry in entries {
                         if entry.is_dir {
                             continue;
                         }
-                        let md5 = entry
-                            .hashes
-                            .as_ref()
-                            .and_then(|h| {
-                                h.get("md5")
-                                    .or_else(|| h.get("MD5"))
-                                    .or_else(|| h.get("quickxor"))
-                            })
-                            .cloned()
-                            .unwrap_or_default();
+                        if let Some((dir, rel_path)) = entry.path.split_once('/') {
+                            if let Some((snap_name, snap_idx)) = in_range_diff_dirs.get(dir) {
+                                let md5 = entry
+                                    .hashes
+                                    .as_ref()
+                                    .and_then(|h| {
+                                        h.get("md5")
+                                            .or_else(|| h.get("MD5"))
+                                            .or_else(|| h.get("quickxor"))
+                                    })
+                                    .cloned()
+                                    .unwrap_or_default();
 
-                        diff_files.push(RawDiffFile {
-                            path: entry.path,
-                            size: entry.size,
-                            md5,
-                            diff_dir: dir.clone(),
-                            snap_name: snap.name.clone(),
-                            snap_idx: idx,
-                        });
+                                diff_files.push(RawDiffFile {
+                                    path: rel_path.to_string(),
+                                    size: entry.size,
+                                    md5,
+                                    diff_dir: dir.to_string(),
+                                    snap_name: snap_name.clone(),
+                                    snap_idx: *snap_idx,
+                                });
+                            }
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(e) => {
+                debug!("Catalog-scoped batch lsjson on diffs failed ({e}). Falling back to per-snapshot inspection.");
+                false
+            }
+        };
+
+        if !batch_scanned {
+            for (idx, snap) in in_range.iter().enumerate() {
+                if let Some(ref dir) = snap.diff_dir {
+                    let diff_path = format!("{remote_base}/diffs/{dir}/");
+                    if let Ok(lsjson) = rclone.lsjson_recursive_hash(&diff_path) {
+                        if let Ok(entries) = serde_json::from_str::<Vec<LsjsonFileEntry>>(&lsjson) {
+                            for entry in entries {
+                                if entry.is_dir {
+                                    continue;
+                                }
+                                let md5 = entry
+                                    .hashes
+                                    .as_ref()
+                                    .and_then(|h| {
+                                        h.get("md5")
+                                            .or_else(|| h.get("MD5"))
+                                            .or_else(|| h.get("quickxor"))
+                                    })
+                                    .cloned()
+                                    .unwrap_or_default();
+
+                                diff_files.push(RawDiffFile {
+                                    path: entry.path,
+                                    size: entry.size,
+                                    md5,
+                                    diff_dir: dir.clone(),
+                                    snap_name: snap.name.clone(),
+                                    snap_idx: idx,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -915,10 +978,41 @@ fn execute_compact_plan(
     let rollback_staged_files = |moved: &[String]| {
         if !moved.is_empty() {
             warn!("Rolling back {} moved diff files to their original diff directories...", moved.len());
-            for entry in moved.iter().rev() {
+            // Group rollback files by source directory so rollback is also batched
+            let prefix = format!("{remote_base}/diffs/");
+            let mut rollback_by_source: std::collections::BTreeMap<String, Vec<String>> =
+                std::collections::BTreeMap::new();
+            let mut unparsed_entries: Vec<(String, String)> = Vec::new();
+
+            for entry in moved {
                 if let Some((src, dst)) = entry.split_once('\t') {
-                    let _ = rclone.moveto(dst, src);
+                    if let Some(rest) = src.strip_prefix(&prefix) {
+                        if let Some((dir, rel)) = rest.split_once('/') {
+                            rollback_by_source
+                                .entry(dir.to_string())
+                                .or_default()
+                                .push(rel.to_string());
+                            continue;
+                        }
+                    }
+                    unparsed_entries.push((dst.to_string(), src.to_string()));
                 }
+            }
+
+            for (dir, paths) in rollback_by_source {
+                let target_diff = format!("{remote_base}/diffs/{dir}");
+                if let Err(e) = rclone.move_files_from(&staging_dir, &target_diff, &paths) {
+                    warn!("Batch rollback to diffs/{dir} failed ({e}). Falling back to individual file moves.");
+                    for path in &paths {
+                        let src = format!("{staging_dir}{path}");
+                        let dst = format!("{target_diff}/{path}");
+                        let _ = rclone.moveto(&src, &dst);
+                    }
+                }
+            }
+
+            for (dst, src) in unparsed_entries {
+                let _ = rclone.moveto(&dst, &src);
             }
         }
         let _ = rclone.delete_file(&staging_journal);
@@ -942,19 +1036,34 @@ fn execute_compact_plan(
         }
     }
 
-    // Step 1: Move kept diff files into staging (server-side move, zero bandwidth)
+    // Step 1: Move kept diff files into staging (server-side batch move, zero bandwidth)
     let mut moved_files: Vec<String> = Vec::new();
     if !plan.files_to_keep.is_empty() {
         rclone.mkdir(&staging_dir)?;
+
+        let mut files_by_source: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
         for file in &plan.files_to_keep {
-            let src = format!("{remote_base}/diffs/{}/{}", file.source_diff_dir, file.path);
-            let dst = format!("{staging_dir}{}", file.path);
-            if let Err(e) = rclone.moveto(&src, &dst) {
-                error!("Move to staging failed for '{}' ({e}). Rolling back staged files...", file.path);
+            files_by_source
+                .entry(file.source_diff_dir.clone())
+                .or_default()
+                .push(file.path.clone());
+        }
+
+        for (source_diff_dir, paths) in &files_by_source {
+            let src_diff_dir = format!("{remote_base}/diffs/{source_diff_dir}");
+            if let Err(e) = rclone.move_files_from(&src_diff_dir, &staging_dir, paths) {
+                error!(
+                    "Batch move to staging failed from diffs/{source_diff_dir} ({e}). Rolling back staged files..."
+                );
                 rollback_staged_files(&moved_files);
                 return Err(e);
             }
-            moved_files.push(format!("{src}\t{dst}"));
+            for path in paths {
+                let src = format!("{src_diff_dir}/{path}");
+                let dst = format!("{staging_dir}{path}");
+                moved_files.push(format!("{src}\t{dst}"));
+            }
         }
     }
 
@@ -1068,15 +1177,42 @@ fn execute_compact_plan(
         "Stage 4: Deleting {} source snapshots...",
         plan.snapshots_to_purge.len()
     );
+    let mut purge_failures: usize = 0;
+    const MAX_PURGE_FAILURES: usize = 2;
+
     for snap in &plan.snapshots_to_purge {
         if let Some(ref dir) = snap.diff_dir {
             let old_diff = format!("{remote_base}/diffs/{dir}");
-            let _ = rclone.delete(&old_diff, &[]);
-            if let Err(e) = rclone.rmdir_specific(&old_diff) {
-                warn!(
-                    "[WARN] Could not remove empty diff directory '{}' ({e}). Please manually remove it if needed: rclone rmdirs \"{}\"",
-                    old_diff, old_diff
-                );
+            let mut purged = false;
+
+            if purge_failures <= MAX_PURGE_FAILURES {
+                match rclone.purge(&old_diff) {
+                    Ok(_) => {
+                        purged = true;
+                    }
+                    Err(e) => {
+                        purge_failures += 1;
+                        warn!(
+                            "rclone purge failed for '{}' ({e}). Falling back to delete + rmdir_specific...",
+                            old_diff
+                        );
+                        if purge_failures > MAX_PURGE_FAILURES {
+                            warn!(
+                                "Too many purge failures ({purge_failures} > {MAX_PURGE_FAILURES}). Disabling rclone purge for remaining snapshots."
+                            );
+                        }
+                    }
+                }
+            }
+
+            if !purged {
+                let _ = rclone.delete(&old_diff, &[]);
+                if let Err(e) = rclone.rmdir_specific(&old_diff) {
+                    warn!(
+                        "[WARN] Could not remove empty diff directory '{}' ({e}). Please manually remove it if needed: rclone rmdirs \"{}\"",
+                        old_diff, old_diff
+                    );
+                }
             }
         }
         let old_manifest = format!("{remote_base}/.meta/manifests/{}", snap.manifest_name);

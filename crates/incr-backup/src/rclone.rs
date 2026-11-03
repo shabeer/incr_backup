@@ -142,6 +142,25 @@ impl Rclone {
         self.lsjson(remote_path, true, true)
     }
 
+    /// Run `rclone lsjson <remote_path> [--recursive] [--fast-list] [--hash] [--include <pattern>...]`.
+    ///
+    /// Scopes the listing to files matching the provided include patterns.
+    /// Always executes (even in dry-run mode) since it's read-only.
+    pub fn lsjson_filtered(
+        &self,
+        remote_path: &str,
+        recursive: bool,
+        with_hash: bool,
+        includes: &[String],
+    ) -> Result<String> {
+        let mut args = Self::lsjson_args(remote_path, recursive, with_hash);
+        for inc in includes {
+            args.push("--include".to_string());
+            args.push(inc.clone());
+        }
+        self.run_rclone(&args, /* is_mutating */ false)
+    }
+
     /// Run `rclone move source dest [--exclude ...] [--delete-empty-src-dirs]`.
     ///
     /// On Google Drive, this is a **server-side** operation — only metadata
@@ -177,6 +196,53 @@ impl Rclone {
             &["moveto".to_string(), source.to_string(), dest.to_string()],
             true,
         )
+    }
+
+    /// Run `rclone move source dest --files-from <temp_file> --transfers 8 --checkers 8`.
+    ///
+    /// Moves a batch of files from `source` to `dest` using a file list.
+    /// On Google Drive and supported cloud remotes, this performs server-side moves
+    /// concurrently using rclone's internal worker pool.
+    pub fn move_files_from(
+        &self,
+        source: &str,
+        dest: &str,
+        relative_paths: &[String],
+    ) -> Result<String> {
+        if relative_paths.is_empty() {
+            return Ok(String::new());
+        }
+
+        use std::io::Write;
+        let mut temp = tempfile::NamedTempFile::new().map_err(IncrError::Io)?;
+        for path in relative_paths {
+            writeln!(temp, "{path}").map_err(IncrError::Io)?;
+        }
+        temp.flush().map_err(IncrError::Io)?;
+
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let args = vec![
+            "move".to_string(),
+            source.to_string(),
+            dest.to_string(),
+            "--files-from".to_string(),
+            temp_path,
+            "--transfers".to_string(),
+            "8".to_string(),
+            "--checkers".to_string(),
+            "8".to_string(),
+        ];
+
+        self.run_rclone(&args, /* is_mutating */ true)
+    }
+
+    /// Run `rclone purge <remote_path>`.
+    ///
+    /// Completely deletes the directory and all of its contents in one operation.
+    /// WARNING: Do NOT pass `--exclude`, `--include`, or filter flags to `purge`.
+    pub fn purge(&self, remote_path: &str) -> Result<String> {
+        self.run_rclone(&["purge".to_string(), remote_path.to_string()], true)
     }
 
     /// Run `rclone mkdir <remote_path>`.
@@ -574,6 +640,23 @@ mod tests {
         let config = test_config();
         let rclone = Rclone::new(&config);
         let result = rclone.rmdir_specific("remote:diffs/2026-11-02T08-00Z");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dry_run_purge_returns_ok() {
+        let config = test_config();
+        let rclone = Rclone::new(&config);
+        let result = rclone.purge("remote:diffs/2026-11-02T08-00Z");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dry_run_move_files_from_returns_ok() {
+        let config = test_config();
+        let rclone = Rclone::new(&config);
+        let files = vec!["file1.txt".to_string(), "subdir/file2.txt".to_string()];
+        let result = rclone.move_files_from("remote:src", "remote:dst", &files);
         assert!(result.is_ok());
     }
 

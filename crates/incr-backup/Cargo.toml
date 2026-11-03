@@ -17,10 +17,10 @@ walkdir = "2"
 thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
+tempfile = "3"
 
 [dev-dependencies]
 test_commons = { path = "../test_commons" }
-tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 
