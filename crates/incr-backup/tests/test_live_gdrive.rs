@@ -772,6 +772,156 @@ fn test_live_snapshot_compaction() {
         .assert()
         .success()
         .stdout(predicate::str::contains("consolidated-daily"));
+
+    // Point-in-time restore of consolidated-daily (Anchor) with checksum verification
+    let restore_anchor = env.temp_dir.path().join("restore_live_anchor");
+    env.command()
+        .args([
+            "restore",
+            "consolidated-daily",
+            "--to",
+            &restore_anchor.to_string_lossy(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read(restore_anchor.join("log.txt")).unwrap(),
+        b"entry 1\nentry 2\n"
+    );
+
+    // Verify obsolete source snapshot manifests are deleted
+    let manifests_output = env.rclone_exec(&["lsf", &format!("{}/.meta/manifests", env.remote_str())]);
+    let manifests_text = String::from_utf8_lossy(&manifests_output.stdout);
+    assert!(!manifests_text.contains("snap-compact-1.json"), "source manifest 1 must be deleted");
+    assert!(!manifests_text.contains("snap-compact-2.json"), "source manifest 2 must be deleted");
+    assert!(manifests_text.contains("consolidated-daily.json"), "consolidated manifest must exist");
+}
+
+#[test]
+#[ignore = "requires live Google Drive remote (run with: cargo test --test test_live_gdrive -- --ignored)"]
+fn test_live_compact_multi_file_scenario_2a() {
+    let Some(env) = LiveGdriveTestEnv::new("compact_scenario_2a") else {
+        eprintln!("Skipping test_live_compact_multi_file_scenario_2a: Google Drive remote unreachable");
+        return;
+    };
+
+    env.command().arg("init").assert().success();
+
+    let now = chrono::Local::now();
+    let from_time = (now - chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    let to_time = (now + chrono::Duration::hours(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+
+    // Baseline (S_prev): Day 0 with all 8 files at v0
+    env.write_source_file("f_mod1", b"f_mod1_v0");
+    env.write_source_file("f_mod2", b"f_mod2_v0");
+    env.write_source_file("f_mod3", b"f_mod3_v0");
+    env.write_source_file("f_single1", b"f_single1_v0");
+    env.write_source_file("f_single2", b"f_single2_v0");
+    env.write_source_file("f_del", b"f_del_v0");
+    env.write_source_file("f_static", b"f_static_v0");
+    env.write_source_file("f_post", b"f_post_v0");
+
+    env.command().args(["sync", "--name", "live-sprev"]).assert().success();
+
+    // S1: modify f_mod*, f_single1
+    env.write_source_file("f_mod1", b"f_mod1_v1");
+    env.write_source_file("f_mod2", b"f_mod2_v1");
+    env.write_source_file("f_mod3", b"f_mod3_v1");
+    env.write_source_file("f_single1", b"f_single1_v1");
+    env.command().args(["sync", "--name", "live-s1"]).assert().success();
+
+    // S2: modify f_mod*, f_single2, delete f_del
+    env.write_source_file("f_mod1", b"f_mod1_v2");
+    env.write_source_file("f_mod2", b"f_mod2_v2");
+    env.write_source_file("f_mod3", b"f_mod3_v2");
+    env.write_source_file("f_single2", b"f_single2_v1");
+    fs::remove_file(env.source_path.join("f_del")).unwrap();
+    env.command().args(["sync", "--name", "live-s2"]).assert().success();
+
+    // S3: modify f_mod*
+    env.write_source_file("f_mod1", b"f_mod1_v3");
+    env.write_source_file("f_mod2", b"f_mod2_v3");
+    env.write_source_file("f_mod3", b"f_mod3_v3");
+    env.command().args(["sync", "--name", "live-s3"]).assert().success();
+
+    // S_post: modify f_post
+    env.write_source_file("f_post", b"f_post_v1");
+    env.command().args(["sync", "--name", "live-spost"]).assert().success();
+
+    // Compact [live-s1 .. live-s3] -> live-consolidated
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            &from_time,
+            "--to",
+            &to_time,
+            "--name",
+            "live-consolidated",
+            "--summary",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Compaction complete: live-consolidated"))
+        .stdout(predicate::str::contains("Diff files kept:      6"))
+        .stdout(predicate::str::contains("Diff files discarded: 6"));
+
+    // Point-in-time restore 1: S_prev from Google Drive with hash verification
+    let restore_sprev = env.temp_dir.path().join("restore_live_sprev");
+    env.command()
+        .args([
+            "restore",
+            "live-sprev",
+            "--to",
+            &restore_sprev.to_string_lossy(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_sprev.join("f_mod1")).unwrap(), b"f_mod1_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_single1")).unwrap(), b"f_single1_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_del")).unwrap(), b"f_del_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_post")).unwrap(), b"f_post_v0");
+
+    // Point-in-time restore 2: Anchor (live-consolidated) from Google Drive
+    let restore_anchor = env.temp_dir.path().join("restore_live_anchor");
+    env.command()
+        .args([
+            "restore",
+            "live-consolidated",
+            "--to",
+            &restore_anchor.to_string_lossy(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_anchor.join("f_mod1")).unwrap(), b"f_mod1_v3");
+    assert_eq!(fs::read(restore_anchor.join("f_single1")).unwrap(), b"f_single1_v1");
+    assert_eq!(fs::read(restore_anchor.join("f_single2")).unwrap(), b"f_single2_v1");
+    assert!(!restore_anchor.join("f_del").exists());
+
+    // Point-in-time restore 3: S_post from Google Drive
+    let restore_spost = env.temp_dir.path().join("restore_live_spost");
+    env.command()
+        .args([
+            "restore",
+            "live-spost",
+            "--to",
+            &restore_spost.to_string_lossy(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_spost.join("f_post")).unwrap(), b"f_post_v1");
+    assert_eq!(fs::read(restore_spost.join("f_mod1")).unwrap(), b"f_mod1_v3");
+    assert!(!restore_spost.join("f_del").exists());
 }
 
 // ─── 12. Remote Removal Across Snapshots ────────────────────────────────────

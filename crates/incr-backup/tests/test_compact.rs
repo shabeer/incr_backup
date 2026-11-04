@@ -148,6 +148,22 @@ fn test_compact_single_snapshot() {
 
     // Check that manifest renamed-single.json exists
     assert!(env.remote_path.join(".meta/manifests/renamed-single.json").exists());
+
+    // Restore renamed-single to verify content
+    let restore_single = env.temp_dir.path().join("restore_single");
+    env.command()
+        .args([
+            "restore",
+            "renamed-single",
+            "--to",
+            &restore_single.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(restore_single.join("hello.txt")).unwrap(), b"Hello World");
 }
 
 #[test]
@@ -572,6 +588,40 @@ fn test_compact_intra_range_created_and_deleted() {
     if compacted_diff.exists() {
         assert!(!compacted_diff.join("temp.txt").exists());
     }
+
+    // Point-in-time restore of daily-intra-test (anchor)
+    let restore_anchor = env.temp_dir.path().join("restore_anchor");
+    env.command()
+        .args([
+            "restore",
+            "daily-intra-test",
+            "--to",
+            &restore_anchor.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(restore_anchor.join("keep.txt")).unwrap(), b"keep");
+    assert!(!restore_anchor.join("temp.txt").exists());
+
+    // Point-in-time restore of s-08:00 (S_prev)
+    let restore_prev = env.temp_dir.path().join("restore_prev");
+    env.command()
+        .args([
+            "restore",
+            "s-08:00",
+            "--to",
+            &restore_prev.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(restore_prev.join("keep.txt")).unwrap(), b"keep");
+    assert!(!restore_prev.join("temp.txt").exists());
 }
 
 #[test]
@@ -636,6 +686,22 @@ fn test_compact_uses_snapshot_jsonl() {
     assert!(!alt_content.contains("snap1"), "snap1 must be removed from snapshot.jsonl");
     assert!(!alt_content.contains("snap2"), "snap2 must be removed from snapshot.jsonl");
     assert!(!alt_content.contains("snap3"), "snap3 must be removed from snapshot.jsonl");
+
+    // Point-in-time restore of consolidated snapshot using snapshot.jsonl
+    let restore_cat = env.temp_dir.path().join("restore_cat");
+    env.command()
+        .args([
+            "restore",
+            "daily-all",
+            "--to",
+            &restore_cat.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(restore_cat.join("doc.txt")).unwrap(), b"version 3");
 }
 
 #[test]
@@ -819,6 +885,38 @@ fn test_compact_recovers_from_interrupted_staging_journal() {
     // Verify that daily-rec now has the compacted diff
     assert!(env.remote_path.join("diffs/daily-rec/doc.txt").exists());
     assert!(!journal_file.exists(), "journal file must be cleaned up on commit");
+
+    // Point-in-time restore of snap0 (S_prev)
+    let restore_snap0 = env.temp_dir.path().join("restore_snap0_journal");
+    env.command()
+        .args([
+            "restore",
+            "snap0",
+            "--to",
+            &restore_snap0.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(restore_snap0.join("doc.txt")).unwrap(), b"v0");
+
+    // Point-in-time restore of daily-rec (anchor)
+    let restore_daily = env.temp_dir.path().join("restore_daily_journal");
+    env.command()
+        .args([
+            "restore",
+            "daily-rec",
+            "--to",
+            &restore_daily.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(restore_daily.join("doc.txt")).unwrap(), b"v2");
 }
 
 #[test]
@@ -914,4 +1012,779 @@ fn test_compact_batch_moves_and_purge_integrity() {
     assert_eq!(fs::read(restore_dir.join("f2.txt")).unwrap(), b"f2_v0");
     assert_eq!(fs::read(restore_dir.join("sub/f3.txt")).unwrap(), b"f3_v0");
     assert_eq!(fs::read(restore_dir.join("sub/f4.txt")).unwrap(), b"f4_v0");
+
+    // Point-in-time restore of consolidated-batch
+    let restore_batch = env.temp_dir.path().join("restore_batch");
+    env.command()
+        .args([
+            "restore",
+            "consolidated-batch",
+            "--to",
+            &restore_batch.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_batch.join("f1.txt")).unwrap(), b"f1_v1");
+    assert_eq!(fs::read(restore_batch.join("f2.txt")).unwrap(), b"f2_v2");
+    assert_eq!(fs::read(restore_batch.join("sub/f3.txt")).unwrap(), b"f3_v1");
+    assert_eq!(fs::read(restore_batch.join("sub/f4.txt")).unwrap(), b"f4_v2");
+}
+
+#[test]
+fn test_compact_multi_file_churn_and_full_restore() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    // Baseline (S_prev): Day 0 with all 8 files at v0
+    env.write_source_file("f_mod1", b"f_mod1_v0");
+    env.write_source_file("f_mod2", b"f_mod2_v0");
+    env.write_source_file("f_mod3", b"f_mod3_v0");
+    env.write_source_file("f_single1", b"f_single1_v0");
+    env.write_source_file("f_single2", b"f_single2_v0");
+    env.write_source_file("f_del", b"f_del_v0");
+    env.write_source_file("f_static", b"f_static_v0");
+    env.write_source_file("f_post", b"f_post_v0");
+
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "sprev"])
+        .assert()
+        .success();
+
+    // Snapshot S1 (10:00):
+    // - f_mod1, f_mod2, f_mod3 updated to v1
+    // - f_single1 updated to v1
+    env.write_source_file("f_mod1", b"f_mod1_v1");
+    env.write_source_file("f_mod2", b"f_mod2_v1");
+    env.write_source_file("f_mod3", b"f_mod3_v1");
+    env.write_source_file("f_single1", b"f_single1_v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s1"])
+        .assert()
+        .success();
+
+    // Snapshot S2 (14:00):
+    // - f_mod1, f_mod2, f_mod3 updated to v2
+    // - f_single2 updated to v1
+    // - f_del deleted
+    env.write_source_file("f_mod1", b"f_mod1_v2");
+    env.write_source_file("f_mod2", b"f_mod2_v2");
+    env.write_source_file("f_mod3", b"f_mod3_v2");
+    env.write_source_file("f_single2", b"f_single2_v1");
+    fs::remove_file(env.source_path.join("f_del")).unwrap();
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s2"])
+        .assert()
+        .success();
+
+    // Snapshot S3 (Anchor, 20:00):
+    // - f_mod1, f_mod2, f_mod3 updated to v3
+    env.write_source_file("f_mod1", b"f_mod1_v3");
+    env.write_source_file("f_mod2", b"f_mod2_v3");
+    env.write_source_file("f_mod3", b"f_mod3_v3");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s3"])
+        .assert()
+        .success();
+
+    // Snapshot S_post (Day 2):
+    // - f_post updated to v1
+    env.write_source_file("f_post", b"f_post_v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "spost"])
+        .assert()
+        .success();
+
+    // Read timestamps from catalog
+    let catalog_content = fs::read_to_string(env.remote_path.join(".meta/snapshots.jsonl")).unwrap();
+    let summaries: Vec<serde_json::Value> = catalog_content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let t_s1 = summaries.iter().find(|s| s["name"] == "s1").unwrap()["created_at"].as_str().unwrap();
+    let t_s3 = summaries.iter().find(|s| s["name"] == "s3").unwrap()["created_at"].as_str().unwrap();
+
+    // Compact range [s1 .. s3] -> consolidated-churn
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            t_s1,
+            "--to",
+            t_s3,
+            "--name",
+            "consolidated-churn",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+            "--summary",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Compaction complete: consolidated-churn"))
+        .stdout(predicate::str::contains("Diff files kept:      6"))
+        .stdout(predicate::str::contains("Diff files discarded: 6"));
+
+    // Check kept diffs in consolidated-churn directory:
+    // Exactly 6 files, all holding v0
+    let consolidated_diff = env.remote_path.join("diffs/consolidated-churn");
+    assert!(consolidated_diff.exists());
+    assert_eq!(fs::read(consolidated_diff.join("f_mod1")).unwrap(), b"f_mod1_v0");
+    assert_eq!(fs::read(consolidated_diff.join("f_mod2")).unwrap(), b"f_mod2_v0");
+    assert_eq!(fs::read(consolidated_diff.join("f_mod3")).unwrap(), b"f_mod3_v0");
+    assert_eq!(fs::read(consolidated_diff.join("f_single1")).unwrap(), b"f_single1_v0");
+    assert_eq!(fs::read(consolidated_diff.join("f_single2")).unwrap(), b"f_single2_v0");
+    assert_eq!(fs::read(consolidated_diff.join("f_del")).unwrap(), b"f_del_v0");
+
+    // Point-in-time restore 1: Restore S_prev
+    // Expected: all 8 files present at v0
+    let restore_sprev = env.temp_dir.path().join("restore_sprev");
+    env.command()
+        .args([
+            "restore",
+            "sprev",
+            "--to",
+            &restore_sprev.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_sprev.join("f_mod1")).unwrap(), b"f_mod1_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_mod2")).unwrap(), b"f_mod2_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_mod3")).unwrap(), b"f_mod3_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_single1")).unwrap(), b"f_single1_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_single2")).unwrap(), b"f_single2_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_del")).unwrap(), b"f_del_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_static")).unwrap(), b"f_static_v0");
+    assert_eq!(fs::read(restore_sprev.join("f_post")).unwrap(), b"f_post_v0");
+
+    // Point-in-time restore 2: Restore consolidated-churn (Anchor S3)
+    // Expected: f_mod* at v3, f_single* at v1, f_static at v0, f_post at v0, f_del ABSENT
+    let restore_anchor = env.temp_dir.path().join("restore_anchor");
+    env.command()
+        .args([
+            "restore",
+            "consolidated-churn",
+            "--to",
+            &restore_anchor.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_anchor.join("f_mod1")).unwrap(), b"f_mod1_v3");
+    assert_eq!(fs::read(restore_anchor.join("f_mod2")).unwrap(), b"f_mod2_v3");
+    assert_eq!(fs::read(restore_anchor.join("f_mod3")).unwrap(), b"f_mod3_v3");
+    assert_eq!(fs::read(restore_anchor.join("f_single1")).unwrap(), b"f_single1_v1");
+    assert_eq!(fs::read(restore_anchor.join("f_single2")).unwrap(), b"f_single2_v1");
+    assert_eq!(fs::read(restore_anchor.join("f_static")).unwrap(), b"f_static_v0");
+    assert_eq!(fs::read(restore_anchor.join("f_post")).unwrap(), b"f_post_v0");
+    assert!(!restore_anchor.join("f_del").exists(), "f_del was deleted in s2");
+
+    // Point-in-time restore 3: Restore S_post
+    // Expected: f_post at v1, f_mod* at v3, f_single* at v1, f_static at v0, f_del ABSENT
+    let restore_spost = env.temp_dir.path().join("restore_spost");
+    env.command()
+        .args([
+            "restore",
+            "spost",
+            "--to",
+            &restore_spost.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_spost.join("f_post")).unwrap(), b"f_post_v1");
+    assert_eq!(fs::read(restore_spost.join("f_mod1")).unwrap(), b"f_mod1_v3");
+    assert_eq!(fs::read(restore_spost.join("f_mod2")).unwrap(), b"f_mod2_v3");
+    assert_eq!(fs::read(restore_spost.join("f_mod3")).unwrap(), b"f_mod3_v3");
+    assert_eq!(fs::read(restore_spost.join("f_single1")).unwrap(), b"f_single1_v1");
+    assert_eq!(fs::read(restore_spost.join("f_single2")).unwrap(), b"f_single2_v1");
+    assert_eq!(fs::read(restore_spost.join("f_static")).unwrap(), b"f_static_v0");
+    assert!(!restore_spost.join("f_del").exists());
+}
+
+#[test]
+fn test_compact_beginning_of_history() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    // S1: file1 v1, file2 v1
+    env.write_source_file("file1.txt", b"file1_v1");
+    env.write_source_file("file2.txt", b"file2_v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s1"])
+        .assert()
+        .success();
+
+    // S2: file1 v2, file2 deleted, file3 v1
+    env.write_source_file("file1.txt", b"file1_v2");
+    fs::remove_file(env.source_path.join("file2.txt")).unwrap();
+    env.write_source_file("file3.txt", b"file3_v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s2"])
+        .assert()
+        .success();
+
+    // S3: file1 v3, file3 v2
+    env.write_source_file("file1.txt", b"file1_v3");
+    env.write_source_file("file3.txt", b"file3_v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s3"])
+        .assert()
+        .success();
+
+    // Read timestamps from catalog
+    let catalog_content = fs::read_to_string(env.remote_path.join(".meta/snapshots.jsonl")).unwrap();
+    let summaries: Vec<serde_json::Value> = catalog_content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let t_s1 = summaries.iter().find(|s| s["name"] == "s1").unwrap()["created_at"].as_str().unwrap();
+    let t_s3 = summaries.iter().find(|s| s["name"] == "s3").unwrap()["created_at"].as_str().unwrap();
+
+    // Compact range starting at beginning of history (S_prev is None)
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            t_s1,
+            "--to",
+            t_s3,
+            "--name",
+            "consolidated-start",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+            "--summary",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Preceding snapshot:   (none — beginning of history)"))
+        .stdout(predicate::str::contains("Diff files kept:      0 (0 B)"));
+
+    // diffs/consolidated-start must exist and be empty
+    let diff_dir = env.remote_path.join("diffs/consolidated-start");
+    assert!(diff_dir.exists(), "Diff directory must exist to preserve 1:1 invariant");
+    let diff_entries: Vec<_> = fs::read_dir(&diff_dir).unwrap().collect();
+    assert!(diff_entries.is_empty(), "Diff dir must be empty when prev is None");
+
+    // Point-in-time restore of consolidated-start
+    let restore_dir = env.temp_dir.path().join("restore_start");
+    env.command()
+        .args([
+            "restore",
+            "consolidated-start",
+            "--to",
+            &restore_dir.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_dir.join("file1.txt")).unwrap(), b"file1_v3");
+    assert_eq!(fs::read(restore_dir.join("file3.txt")).unwrap(), b"file3_v2");
+    assert!(!restore_dir.join("file2.txt").exists());
+}
+
+#[test]
+fn test_compact_reincarnation_and_circular_edits() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    // S_prev: reinc.txt = V0, circ.txt = VA
+    env.write_source_file("reinc.txt", b"reinc_V0");
+    env.write_source_file("circ.txt", b"circ_VA");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "sprev"])
+        .assert()
+        .success();
+
+    // S1: reinc.txt deleted (moved to diff holding V0), circ.txt -> VB
+    fs::remove_file(env.source_path.join("reinc.txt")).unwrap();
+    env.write_source_file("circ.txt", b"circ_VB");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s1"])
+        .assert()
+        .success();
+
+    // S2: reinc.txt reincarnated with V_new, circ.txt -> VC
+    env.write_source_file("reinc.txt", b"reinc_Vnew");
+    env.write_source_file("circ.txt", b"circ_VC");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s2"])
+        .assert()
+        .success();
+
+    // S3 (Anchor): reinc.txt -> V_final, circ.txt reverted to VA
+    env.write_source_file("reinc.txt", b"reinc_Vfinal");
+    env.write_source_file("circ.txt", b"circ_VA");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s3"])
+        .assert()
+        .success();
+
+    // Read timestamps from catalog
+    let catalog_content = fs::read_to_string(env.remote_path.join(".meta/snapshots.jsonl")).unwrap();
+    let summaries: Vec<serde_json::Value> = catalog_content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let t_s1 = summaries.iter().find(|s| s["name"] == "s1").unwrap()["created_at"].as_str().unwrap();
+    let t_s3 = summaries.iter().find(|s| s["name"] == "s3").unwrap()["created_at"].as_str().unwrap();
+
+    // Compact [s1 .. s3] -> consolidated-edge
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            t_s1,
+            "--to",
+            t_s3,
+            "--name",
+            "consolidated-edge",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+            "--summary",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Compaction complete: consolidated-edge"));
+
+    // Earliest diff rule check:
+    // In consolidated-edge diff:
+    // - reinc.txt must have V0 from s1 (needed for S_prev)
+    // - circ.txt must have VA from s1 (needed for S_prev)
+    let edge_diff = env.remote_path.join("diffs/consolidated-edge");
+    assert_eq!(fs::read(edge_diff.join("reinc.txt")).unwrap(), b"reinc_V0");
+    assert_eq!(fs::read(edge_diff.join("circ.txt")).unwrap(), b"circ_VA");
+
+    // Point-in-time restore S_prev:
+    let restore_sprev = env.temp_dir.path().join("restore_edge_sprev");
+    env.command()
+        .args([
+            "restore",
+            "sprev",
+            "--to",
+            &restore_sprev.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_sprev.join("reinc.txt")).unwrap(), b"reinc_V0");
+    assert_eq!(fs::read(restore_sprev.join("circ.txt")).unwrap(), b"circ_VA");
+
+    // Point-in-time restore Anchor (consolidated-edge):
+    let restore_anchor = env.temp_dir.path().join("restore_edge_anchor");
+    env.command()
+        .args([
+            "restore",
+            "consolidated-edge",
+            "--to",
+            &restore_anchor.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_anchor.join("reinc.txt")).unwrap(), b"reinc_Vfinal");
+    assert_eq!(fs::read(restore_anchor.join("circ.txt")).unwrap(), b"circ_VA");
+}
+
+#[test]
+fn test_compact_recursive_hierarchy() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    // Baseline S0
+    env.write_source_file("f1.txt", b"f1_base");
+    env.write_source_file("f2.txt", b"f2_base");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s0"])
+        .assert()
+        .success();
+
+    // Hourly H1: f1 -> h1
+    env.write_source_file("f1.txt", b"f1_h1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "h1"])
+        .assert()
+        .success();
+
+    // Hourly H2: f1 -> h2
+    env.write_source_file("f1.txt", b"f1_h2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "h2"])
+        .assert()
+        .success();
+
+    // Compact H1..H2 -> daily-1
+    let catalog = fs::read_to_string(env.remote_path.join(".meta/snapshots.jsonl")).unwrap();
+    let get_ts = |name: &str| {
+        let summaries: Vec<serde_json::Value> = catalog
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        summaries.iter().find(|s| s["name"] == name).unwrap()["created_at"].as_str().unwrap().to_string()
+    };
+    let t_h1 = get_ts("h1");
+    let t_h2 = get_ts("h2");
+
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            &t_h1,
+            "--to",
+            &t_h2,
+            "--name",
+            "daily-1",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .success();
+
+    // Hourly H3: f2 -> h3
+    env.write_source_file("f2.txt", b"f2_h3");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "h3"])
+        .assert()
+        .success();
+
+    // Hourly H4: f2 -> h4
+    env.write_source_file("f2.txt", b"f2_h4");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "h4"])
+        .assert()
+        .success();
+
+    // Compact H3..H4 -> daily-2
+    let catalog2 = fs::read_to_string(env.remote_path.join(".meta/snapshots.jsonl")).unwrap();
+    let get_ts2 = |name: &str| {
+        let summaries: Vec<serde_json::Value> = catalog2
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        summaries.iter().find(|s| s["name"] == name).unwrap()["created_at"].as_str().unwrap().to_string()
+    };
+    let t_h3 = get_ts2("h3");
+    let t_h4 = get_ts2("h4");
+
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            &t_h3,
+            "--to",
+            &t_h4,
+            "--name",
+            "daily-2",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .success();
+
+    // Tier 2: Compact daily-1..daily-2 -> weekly-1
+    let catalog3 = fs::read_to_string(env.remote_path.join(".meta/snapshots.jsonl")).unwrap();
+    let get_ts3 = |name: &str| {
+        let summaries: Vec<serde_json::Value> = catalog3
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        summaries.iter().find(|s| s["name"] == name).unwrap()["created_at"].as_str().unwrap().to_string()
+    };
+    let t_daily1 = get_ts3("daily-1");
+    let t_daily2 = get_ts3("daily-2");
+
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            &t_daily1,
+            "--to",
+            &t_daily2,
+            "--name",
+            "weekly-1",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .success();
+
+    // Verify restore of baseline S0 across the recursive compact hierarchy
+    let restore_s0 = env.temp_dir.path().join("restore_rec_s0");
+    env.command()
+        .args([
+            "restore",
+            "s0",
+            "--to",
+            &restore_s0.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_s0.join("f1.txt")).unwrap(), b"f1_base");
+    assert_eq!(fs::read(restore_s0.join("f2.txt")).unwrap(), b"f2_base");
+
+    // Verify restore of consolidated weekly-1
+    let restore_weekly = env.temp_dir.path().join("restore_rec_weekly");
+    env.command()
+        .args([
+            "restore",
+            "weekly-1",
+            "--to",
+            &restore_weekly.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(restore_weekly.join("f1.txt")).unwrap(), b"f1_h2");
+    assert_eq!(fs::read(restore_weekly.join("f2.txt")).unwrap(), b"f2_h4");
+}
+
+#[test]
+fn test_compact_verification_failure_rolls_back() {
+    use incr_backup::compact::{build_compact_plan, execute_compact_plan, CompactOptions};
+    use incr_backup::config::{Config, SnapshotTimezone};
+    use incr_backup::rclone::Rclone;
+
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    env.write_source_file("doc.txt", b"v0");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s0"])
+        .assert()
+        .success();
+
+    env.write_source_file("doc.txt", b"v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s1"])
+        .assert()
+        .success();
+
+    env.write_source_file("doc.txt", b"v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s2"])
+        .assert()
+        .success();
+
+    let catalog_content = fs::read_to_string(env.remote_path.join(".meta/snapshots.jsonl")).unwrap();
+    let summaries: Vec<serde_json::Value> = catalog_content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let t_s1 = summaries.iter().find(|s| s["name"] == "s1").unwrap()["created_at"].as_str().unwrap();
+    let t_s2 = summaries.iter().find(|s| s["name"] == "s2").unwrap()["created_at"].as_str().unwrap();
+
+    let config = Config {
+        source_path: env.source_str(),
+        remote_path: env.remote_str(),
+        rclone: Default::default(),
+        exclude: Default::default(),
+        verbose: 0,
+        dry_run: false,
+        timezone: SnapshotTimezone::Utc,
+    };
+    let rclone = Rclone::new(&config);
+
+    let opts = CompactOptions {
+        from: t_s1.to_string(),
+        to: t_s2.to_string(),
+        name: "fail-stage2".to_string(),
+        dry_run: false,
+        force_lock: false,
+        summary: false,
+        full_list: false,
+    };
+
+    let mut plan = build_compact_plan(&rclone, &env.remote_str(), &config, &opts).unwrap();
+    assert_eq!(plan.files_to_keep.len(), 1);
+
+    // Corrupt the expected MD5 in the plan so Stage 2 hash verification deliberately fails
+    plan.files_to_keep[0].md5 = "tampered_bad_hash".to_string();
+
+    let result = execute_compact_plan(&rclone, &env.remote_str(), &plan, std::time::Instant::now());
+    assert!(result.is_err(), "Must return error on hash mismatch");
+    let err_str = format!("{}", result.unwrap_err());
+    assert!(
+        err_str.contains("Hash verification failed for staged file"),
+        "Unexpected error: {err_str}"
+    );
+
+    // Invariant: rollback_staged_files must have restored the diff back to s1
+    assert!(
+        env.remote_path.join("diffs/s1/doc.txt").exists(),
+        "diffs/s1/doc.txt must be restored by rollback"
+    );
+    assert_eq!(fs::read(env.remote_path.join("diffs/s1/doc.txt")).unwrap(), b"v0");
+
+    // Invariant: staging must be wiped
+    assert!(!env.remote_path.join(".meta/staging/fail-stage2").exists());
+    assert!(!env.remote_path.join(".meta/staging/fail-stage2.journal.json").exists());
+    assert!(!env.remote_path.join(".meta/staging/fail-stage2.manifest.json").exists());
+
+    // Invariant: original snapshots are 100% intact and can be restored
+    let restore_s0 = env.temp_dir.path().join("restore_s0_after_fail");
+    env.command()
+        .args([
+            "restore",
+            "s0",
+            "--to",
+            &restore_s0.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(restore_s0.join("doc.txt")).unwrap(), b"v0");
+
+    let restore_s2 = env.temp_dir.path().join("restore_s2_after_fail");
+    env.command()
+        .args([
+            "restore",
+            "s2",
+            "--to",
+            &restore_s2.to_string_lossy(),
+            "--remote",
+            &env.remote_str(),
+            "--verify",
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(restore_s2.join("doc.txt")).unwrap(), b"v2");
+}
+
+#[test]
+fn test_compact_force_breaks_stale_lock() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["init", "--source", &env.source_str(), "--remote", &env.remote_str(), "--timezone", "utc"])
+        .assert()
+        .success();
+
+    env.write_source_file("f.txt", b"v1");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s1"])
+        .assert()
+        .success();
+
+    env.write_source_file("f.txt", b"v2");
+    env.command()
+        .args(["sync", "--source", &env.source_str(), "--remote", &env.remote_str(), "--name", "s2"])
+        .assert()
+        .success();
+
+    // Create a foreign lock on remote
+    let lock_json = serde_json::json!({
+        "holder": "foreign-agent.example.com",
+        "pid": 99999,
+        "started_at": chrono::Utc::now().to_rfc3339(),
+        "timeout_minutes": 600000
+    });
+    let meta_dir = env.remote_path.join(".meta");
+    let lock_file = meta_dir.join("lock");
+    fs::write(&lock_file, serde_json::to_string(&lock_json).unwrap()).unwrap();
+
+    let from = "2020-01-01T00:00:00Z";
+    let to = "2030-01-01T00:00:00Z";
+
+    // 1. Without --force, compact must fail fast with lock held
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            from,
+            "--to",
+            to,
+            "--name",
+            "force-test",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("backup locked by 'foreign-agent.example.com'"));
+
+    // 2. With --force, compact breaks the lock, completes, and cleanly releases lock
+    env.command()
+        .args([
+            "compact",
+            "--from",
+            from,
+            "--to",
+            to,
+            "--name",
+            "force-test",
+            "--remote",
+            &env.remote_str(),
+            "--timezone",
+            "utc",
+            "--force",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Compaction complete: force-test"));
+
+    assert!(!lock_file.exists(), "Lock must be released upon successful compaction");
 }

@@ -142,11 +142,6 @@ pub fn run_restore(config: &Config, rclone: &Rclone, options: &RestoreOptions) -
                         } else {
                             target_manifest.files.push(file);
                         }
-                    } else if !target_manifest.has_file(&file.path) {
-                        // When preceding snapshots exist, only files deleted during this sync that are absent from
-                        // target_manifest are added if restoring by this diff directory
-                        diff_file_set.insert(file.path.clone());
-                        target_manifest.files.push(file);
                     }
                 }
                 target_manifest.file_count = target_manifest.files.len();

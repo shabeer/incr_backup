@@ -338,6 +338,110 @@ pub fn build_compact_plan(
     build_compact_plan_with_times(rclone, remote_base, config, options, from_utc, to_utc)
 }
 
+// Tuple / Record: (file_path, file_size, file_md5, diff_dir_name, snapshot_name, snap_index)
+#[derive(Debug, Clone)]
+pub struct RawDiffFile {
+    pub path: String,
+    pub size: u64,
+    pub md5: String,
+    pub diff_dir: String,
+    pub snap_name: String,
+    pub snap_idx: usize,
+}
+
+/// Classify diff files into keep vs. discard according to reverse-incremental invariants.
+pub fn classify_diff_files(
+    diff_files: Vec<RawDiffFile>,
+    prev_manifest: Option<&Manifest>,
+) -> (Vec<KeepFilePlan>, Vec<DiscardFilePlan>) {
+    // Group diff files by relative path
+    let mut files_by_path: HashMap<String, Vec<RawDiffFile>> = HashMap::new();
+    for f in diff_files {
+        files_by_path.entry(f.path.clone()).or_default().push(f);
+    }
+
+    let mut files_to_keep = Vec::new();
+    let mut files_to_discard = Vec::new();
+
+    // Preceding snapshot file lookup
+    let prev_files_map: Option<HashMap<String, String>> = prev_manifest.map(|p| {
+        p.files
+            .iter()
+            .map(|f| (f.path.clone(), f.md5.clone()))
+            .collect()
+    });
+
+    for (path, mut occurrences) in files_by_path {
+        // Sort occurrences chronologically (by snapshot index in range)
+        occurrences.sort_by_key(|o| o.snap_idx);
+
+        match &prev_files_map {
+            None => {
+                // Beginning of history: no snapshots exist prior to the range.
+                // Pre-range history requires zero diffs.
+                for occ in occurrences {
+                    files_to_discard.push(DiscardFilePlan {
+                        path: occ.path,
+                        size: occ.size,
+                        md5: occ.md5,
+                        source_diff_dir: occ.diff_dir,
+                        source_snapshot: occ.snap_name,
+                        reason: "No snapshots prior to compaction range; diff not needed"
+                            .to_string(),
+                    });
+                }
+            }
+            Some(prev_map) => {
+                if !prev_map.contains_key(&path) {
+                    // File created and deleted intra-range (never existed in S_prev).
+                    for occ in occurrences {
+                        files_to_discard.push(DiscardFilePlan {
+                            path: occ.path,
+                            size: occ.size,
+                            md5: occ.md5,
+                            source_diff_dir: occ.diff_dir,
+                            source_snapshot: occ.snap_name,
+                            reason: "Created intra-range; not needed by pre-range snapshots"
+                                .to_string(),
+                        });
+                    }
+                } else {
+                    // File existed in S_prev!
+                    // Earliest diff rule: keep the earliest diff version, discard later revisions.
+                    let earliest = occurrences.remove(0);
+                    files_to_keep.push(KeepFilePlan {
+                        path: earliest.path.clone(),
+                        size: earliest.size,
+                        md5: earliest.md5.clone(),
+                        source_diff_dir: earliest.diff_dir.clone(),
+                        source_snapshot: earliest.snap_name.clone(),
+                    });
+
+                    for later in occurrences {
+                        files_to_discard.push(DiscardFilePlan {
+                            path: later.path,
+                            size: later.size,
+                            md5: later.md5,
+                            source_diff_dir: later.diff_dir,
+                            source_snapshot: later.snap_name,
+                            reason: format!(
+                                "Superseded by earlier diff version in {}",
+                                earliest.snap_name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort plans by path for consistent deterministic reporting
+    files_to_keep.sort_by(|a, b| a.path.cmp(&b.path));
+    files_to_discard.sort_by(|a, b| a.path.cmp(&b.path));
+
+    (files_to_keep, files_to_discard)
+}
+
 /// Internal plan builder using pre-validated timestamps.
 pub fn build_compact_plan_with_times(
     rclone: &Rclone,
@@ -469,16 +573,6 @@ pub fn build_compact_plan_with_times(
         .collect();
 
     // Inspect files in diff directories of all in-range snapshots
-    // Tuple: (file_path, file_size, file_md5, diff_dir_name, snapshot_name, snap_index)
-    struct RawDiffFile {
-        path: String,
-        size: u64,
-        md5: String,
-        diff_dir: String,
-        snap_name: String,
-        snap_idx: usize,
-    }
-
     let mut diff_files: Vec<RawDiffFile> = Vec::new();
     let mut existing_diff_dirs: HashSet<String> = HashSet::new();
 
@@ -590,91 +684,10 @@ pub fn build_compact_plan_with_times(
         }
     }
 
-    // Group diff files by relative path
-    let mut files_by_path: HashMap<String, Vec<RawDiffFile>> = HashMap::new();
-    for f in diff_files {
-        files_by_path.entry(f.path.clone()).or_default().push(f);
-    }
-
-    let mut files_to_keep = Vec::new();
-    let mut files_to_discard = Vec::new();
-
-    // Preceding snapshot file lookup
-    let prev_files_map: Option<HashMap<String, String>> = prev.as_ref().map(|p| {
-        p.manifest
-            .files
-            .iter()
-            .map(|f| (f.path.clone(), f.md5.clone()))
-            .collect()
-    });
-
-    for (path, mut occurrences) in files_by_path {
-        // Sort occurrences chronologically (by snapshot index in range)
-        occurrences.sort_by_key(|o| o.snap_idx);
-
-        match &prev_files_map {
-            None => {
-                // Beginning of history: no snapshots exist prior to the range.
-                // Pre-range history requires zero diffs.
-                for occ in occurrences {
-                    files_to_discard.push(DiscardFilePlan {
-                        path: occ.path,
-                        size: occ.size,
-                        md5: occ.md5,
-                        source_diff_dir: occ.diff_dir,
-                        source_snapshot: occ.snap_name,
-                        reason: "No snapshots prior to compaction range; diff not needed"
-                            .to_string(),
-                    });
-                }
-            }
-            Some(prev_map) => {
-                if !prev_map.contains_key(&path) {
-                    // File created and deleted intra-range (never existed in S_prev).
-                    for occ in occurrences {
-                        files_to_discard.push(DiscardFilePlan {
-                            path: occ.path,
-                            size: occ.size,
-                            md5: occ.md5,
-                            source_diff_dir: occ.diff_dir,
-                            source_snapshot: occ.snap_name,
-                            reason: "Created intra-range; not needed by pre-range snapshots"
-                                .to_string(),
-                        });
-                    }
-                } else {
-                    // File existed in S_prev!
-                    // Earliest diff rule: keep the earliest diff version, discard later revisions.
-                    let earliest = occurrences.remove(0);
-                    files_to_keep.push(KeepFilePlan {
-                        path: earliest.path.clone(),
-                        size: earliest.size,
-                        md5: earliest.md5.clone(),
-                        source_diff_dir: earliest.diff_dir.clone(),
-                        source_snapshot: earliest.snap_name.clone(),
-                    });
-
-                    for later in occurrences {
-                        files_to_discard.push(DiscardFilePlan {
-                            path: later.path,
-                            size: later.size,
-                            md5: later.md5,
-                            source_diff_dir: later.diff_dir,
-                            source_snapshot: later.snap_name,
-                            reason: format!(
-                                "Superseded by earlier diff version in {}",
-                                earliest.snap_name
-                            ),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // Sort plans by path for consistent deterministic reporting
-    files_to_keep.sort_by(|a, b| a.path.cmp(&b.path));
-    files_to_discard.sort_by(|a, b| a.path.cmp(&b.path));
+    let (files_to_keep, files_to_discard) = classify_diff_files(
+        diff_files,
+        prev.as_ref().map(|p| &p.manifest),
+    );
 
     Ok(CompactPlan {
         from_str: options.from.clone(),
@@ -819,6 +832,29 @@ pub fn format_full_list(plan: &CompactPlan) -> String {
 
 // ─── Execution Pipeline ─────────────────────────────────────────────────────
 
+/// Crash Recovery: Rollback any existing staged files from an aborted previous run before cleaning staging.
+pub fn recover_staging_journal_if_any(rclone: &Rclone, remote_base: &str, target_name: &str) {
+    let staging_dir = format!("{remote_base}/.meta/staging/{target_name}/");
+    let staging_manifest = format!("{remote_base}/.meta/staging/{target_name}.manifest.json");
+    let staging_journal = format!("{remote_base}/.meta/staging/{target_name}.journal.json");
+
+    if let Ok(journal_content) = rclone.cat(&staging_journal) {
+        if let Ok(entries) = serde_json::from_str::<Vec<(String, String)>>(&journal_content) {
+            warn!(
+                "Found interrupted compaction journal for '{target_name}'. Recovering {} staged files to their source snapshots...",
+                entries.len()
+            );
+            for (src, dst) in entries.iter().rev() {
+                let _ = rclone.moveto(dst, src);
+            }
+        }
+        let _ = rclone.delete_file(&staging_journal);
+        let _ = rclone.delete(&staging_dir, &[]);
+        let _ = rclone.rmdir_specific(&staging_dir);
+        let _ = rclone.delete_file(&staging_manifest);
+    }
+}
+
 /// Run the compaction pipeline: build plan, acquire lock, verify, commit, and purge.
 pub fn run_compact(
     config: &Config,
@@ -838,6 +874,8 @@ pub fn run_compact(
     } else {
         lock_mgr.acquire(options.force_lock)?;
         debug!("Remote advisory lock acquired");
+        // Crash recovery must run under the lock BEFORE building the plan so source diffs are fully populated
+        recover_staging_journal_if_any(rclone, remote_base, &options.name);
     }
 
     // Build plan
@@ -892,7 +930,7 @@ pub fn run_compact(
     exec_res
 }
 
-fn execute_compact_plan(
+pub fn execute_compact_plan(
     rclone: &Rclone,
     remote_base: &str,
     plan: &CompactPlan,
@@ -967,22 +1005,7 @@ fn execute_compact_plan(
     let final_diff_dir = format!("{remote_base}/diffs/{}", plan.name);
 
     // Crash Recovery: Rollback any existing staged files from an aborted previous run before cleaning staging
-    if let Ok(journal_content) = rclone.cat(&staging_journal) {
-        if let Ok(entries) = serde_json::from_str::<Vec<(String, String)>>(&journal_content) {
-            warn!(
-                "Found interrupted compaction journal for '{}'. Recovering {} staged files to their source snapshots...",
-                plan.name,
-                entries.len()
-            );
-            for (src, dst) in entries.iter().rev() {
-                let _ = rclone.moveto(dst, src);
-            }
-        }
-        let _ = rclone.delete_file(&staging_journal);
-        let _ = rclone.delete(&staging_dir, &[]);
-        let _ = rclone.rmdir_specific(&staging_dir);
-        let _ = rclone.delete_file(&staging_manifest);
-    }
+    recover_staging_journal_if_any(rclone, remote_base, &plan.name);
 
     info!(
         "Stage 1: Staging {} diff files for '{}'...",
@@ -1400,44 +1423,234 @@ mod tests {
 
     #[test]
     fn test_earliest_diff_rule_logic() {
-        // Test logic matching Section 2 & 3:
-        // Day 1 (S_prev): report.docx = VA, budget.xlsx = V1, logo.png = VL
+        // Setup S_prev (Day 1): report.docx = VA, budget.xlsx = V1, logo.png = VL
         let t1 = DateTime::parse_from_rfc3339("2026-10-27T23:00:00Z").unwrap().with_timezone(&Utc);
-        let s_prev = SnapshotMeta {
-            name: "day-2026-10-27".to_string(),
-            manifest_name: "day-2026-10-27.json".to_string(),
-            created_at: t1,
-            diff_dir: None,
-            manifest: sample_manifest(
-                "day-2026-10-27",
-                vec![
-                    ("report.docx", 100, "VA"),
-                    ("budget.xlsx", 200, "V1"),
-                    ("logo.png", 300, "VL"),
-                ],
-                t1,
-            ),
+        let s_prev_manifest = sample_manifest(
+            "day-2026-10-27",
+            vec![
+                ("report.docx", 100, "VA"),
+                ("budget.xlsx", 200, "V1"),
+                ("logo.png", 300, "VL"),
+            ],
+            t1,
+        );
+
+        // Diff occurrences across intra-range snapshots:
+        // snap-10:00 (idx: 0): budget.xlsx (V1)
+        // snap-14:00 (idx: 1): report.docx (VA), temp.txt (V_temp - created intra-range)
+        // snap-20:00 (idx: 2): report.docx (VB)
+        let diff_files = vec![
+            RawDiffFile {
+                path: "report.docx".to_string(),
+                size: 100,
+                md5: "VA".to_string(),
+                diff_dir: "snap-14:00".to_string(),
+                snap_name: "snap-14:00".to_string(),
+                snap_idx: 1,
+            },
+            RawDiffFile {
+                path: "report.docx".to_string(),
+                size: 102,
+                md5: "VB".to_string(),
+                diff_dir: "snap-20:00".to_string(),
+                snap_name: "snap-20:00".to_string(),
+                snap_idx: 2,
+            },
+            RawDiffFile {
+                path: "budget.xlsx".to_string(),
+                size: 200,
+                md5: "V1".to_string(),
+                diff_dir: "snap-10:00".to_string(),
+                snap_name: "snap-10:00".to_string(),
+                snap_idx: 0,
+            },
+            RawDiffFile {
+                path: "temp.txt".to_string(),
+                size: 50,
+                md5: "V_temp".to_string(),
+                diff_dir: "snap-14:00".to_string(),
+                snap_name: "snap-14:00".to_string(),
+                snap_idx: 1,
+            },
+        ];
+
+        // 1. With S_prev present:
+        let (kept, discarded) = classify_diff_files(diff_files.clone(), Some(&s_prev_manifest));
+
+        // Exactly 2 kept: budget.xlsx (V1) and report.docx (VA from earliest snap-14:00)
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].path, "budget.xlsx");
+        assert_eq!(kept[0].md5, "V1");
+        assert_eq!(kept[0].source_snapshot, "snap-10:00");
+        assert_eq!(kept[1].path, "report.docx");
+        assert_eq!(kept[1].md5, "VA");
+        assert_eq!(kept[1].source_snapshot, "snap-14:00");
+
+        // Exactly 2 discarded: report.docx (VB from snap-20:00) and temp.txt (intra-range scratch)
+        assert_eq!(discarded.len(), 2);
+        assert_eq!(discarded[0].path, "report.docx");
+        assert_eq!(discarded[0].md5, "VB");
+        assert_eq!(
+            discarded[0].reason,
+            "Superseded by earlier diff version in snap-14:00"
+        );
+        assert_eq!(discarded[1].path, "temp.txt");
+        assert_eq!(
+            discarded[1].reason,
+            "Created intra-range; not needed by pre-range snapshots"
+        );
+
+        // 2. Beginning of history (S_prev is None):
+        let (kept_none, discarded_none) = classify_diff_files(diff_files, None);
+        assert!(kept_none.is_empty(), "When prev is None, zero diffs must be kept");
+        assert_eq!(discarded_none.len(), 4);
+        for d in discarded_none {
+            assert_eq!(
+                d.reason,
+                "No snapshots prior to compaction range; diff not needed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_compact_params() {
+        let valid_opts = CompactOptions {
+            from: "2026-10-28T00:00:00Z".to_string(),
+            to: "2026-10-28T23:59:59Z".to_string(),
+            name: "daily-2026-10-28".to_string(),
+            dry_run: false,
+            force_lock: false,
+            summary: false,
+            full_list: false,
         };
 
-        // Day 2 (Anchor: snap-20:00): report.docx = VC, budget.xlsx = V2, logo.png = VL
+        // Valid
+        let (from_utc, to_utc) = validate_compact_params(&valid_opts, SnapshotTimezone::Utc).unwrap();
+        assert_eq!(from_utc.to_rfc3339(), "2026-10-28T00:00:00+00:00");
+        assert_eq!(to_utc.to_rfc3339(), "2026-10-28T23:59:59+00:00");
+
+        // Empty name
+        let mut bad_opts = valid_opts.clone();
+        bad_opts.name = "".to_string();
+        assert!(matches!(
+            validate_compact_params(&bad_opts, SnapshotTimezone::Utc),
+            Err(IncrError::CompactionError(msg)) if msg.contains("Invalid consolidated snapshot name ''")
+        ));
+
+        // Slash in name
+        bad_opts.name = "sub/daily".to_string();
+        assert!(matches!(
+            validate_compact_params(&bad_opts, SnapshotTimezone::Utc),
+            Err(IncrError::CompactionError(msg)) if msg.contains("Invalid consolidated snapshot name 'sub/daily'")
+        ));
+
+        // Backslash in name
+        bad_opts.name = "sub\\daily".to_string();
+        assert!(matches!(
+            validate_compact_params(&bad_opts, SnapshotTimezone::Utc),
+            Err(IncrError::CompactionError(msg)) if msg.contains("Invalid consolidated snapshot name 'sub\\daily'")
+        ));
+
+        // Leading dot in name
+        bad_opts.name = ".hidden".to_string();
+        assert!(matches!(
+            validate_compact_params(&bad_opts, SnapshotTimezone::Utc),
+            Err(IncrError::CompactionError(msg)) if msg.contains("Invalid consolidated snapshot name '.hidden'")
+        ));
+
+        // from > to
+        let mut inverted_opts = valid_opts.clone();
+        inverted_opts.from = "2026-10-28T23:59:59Z".to_string();
+        inverted_opts.to = "2026-10-28T00:00:00Z".to_string();
+        assert!(matches!(
+            validate_compact_params(&inverted_opts, SnapshotTimezone::Utc),
+            Err(IncrError::CompactionError(msg)) if msg.contains("--from timestamp must be before or equal to --to timestamp")
+        ));
+    }
+
+    #[test]
+    fn test_format_summary_and_full_list() {
+        let t1 = DateTime::parse_from_rfc3339("2026-10-27T23:00:00Z").unwrap().with_timezone(&Utc);
         let t2 = DateTime::parse_from_rfc3339("2026-10-28T20:00:00Z").unwrap().with_timezone(&Utc);
+
+        let snap1 = SnapshotMeta {
+            name: "snap1".to_string(),
+            manifest_name: "snap1.json".to_string(),
+            created_at: t1,
+            diff_dir: Some("snap1".to_string()),
+            manifest: sample_manifest("snap1", vec![("file.txt", 100, "hash1")], t1),
+        };
         let anchor = SnapshotMeta {
-            name: "snap-20:00".to_string(),
-            manifest_name: "snap-20:00.json".to_string(),
+            name: "snap2".to_string(),
+            manifest_name: "snap2.json".to_string(),
             created_at: t2,
-            diff_dir: Some("snap-20:00".to_string()),
-            manifest: sample_manifest(
-                "snap-20:00",
-                vec![
-                    ("report.docx", 105, "VC"),
-                    ("budget.xlsx", 210, "V2"),
-                    ("logo.png", 300, "VL"),
-                ],
-                t2,
-            ),
+            diff_dir: Some("snap2".to_string()),
+            manifest: sample_manifest("snap2", vec![("file.txt", 100, "hash2")], t2),
         };
 
-        assert_eq!(anchor.manifest.files.len(), 3);
-        assert_eq!(s_prev.manifest.files.len(), 3);
+        // Multi-snapshot plan
+        let multi_plan = CompactPlan {
+            from_str: "2026-10-28T00:00:00Z".to_string(),
+            to_str: "2026-10-28T23:59:59Z".to_string(),
+            from_utc: t1,
+            to_utc: t2,
+            name: "daily-multi".to_string(),
+            in_range_snapshots: vec![snap1.clone(), anchor.clone()],
+            anchor_snapshot: anchor.clone(),
+            prev_snapshot: Some(snap1.clone()),
+            files_to_keep: vec![KeepFilePlan {
+                path: "file.txt".to_string(),
+                size: 100,
+                md5: "hash1".to_string(),
+                source_diff_dir: "snap1".to_string(),
+                source_snapshot: "snap1".to_string(),
+            }],
+            files_to_discard: vec![DiscardFilePlan {
+                path: "old.txt".to_string(),
+                size: 50,
+                md5: "hash_old".to_string(),
+                source_diff_dir: "snap1".to_string(),
+                source_snapshot: "snap1".to_string(),
+                reason: "Created intra-range; not needed by pre-range snapshots".to_string(),
+            }],
+            snapshots_to_purge: vec![snap1.clone(), anchor.clone()],
+            is_single: false,
+            existing_diff_dirs: HashSet::new(),
+        };
+
+        let summary = format_summary(&multi_plan);
+        assert!(summary.contains("Compaction Plan Summary:"));
+        assert!(summary.contains("Consolidated name:    daily-multi"));
+        assert!(summary.contains("Snapshots in range:   2 (snap1, snap2)"));
+        assert!(summary.contains("Diff files kept:      1"));
+        assert!(summary.contains("Diff files discarded: 1"));
+
+        let full_list = format_full_list(&multi_plan);
+        assert!(full_list.contains("Detailed Compaction Plan for 'daily-multi'"));
+        assert!(full_list.contains("+ file.txt (100 B, md5: hash1) from diffs/snap1/"));
+        assert!(full_list.contains("- old.txt (50 B) in diffs/snap1/"));
+
+        // Single snapshot alias
+        let single_plan = CompactPlan {
+            from_str: "2026-10-28T00:00:00Z".to_string(),
+            to_str: "2026-10-28T23:59:59Z".to_string(),
+            from_utc: t1,
+            to_utc: t2,
+            name: "daily-single".to_string(),
+            in_range_snapshots: vec![anchor.clone()],
+            anchor_snapshot: anchor,
+            prev_snapshot: None,
+            files_to_keep: Vec::new(),
+            files_to_discard: Vec::new(),
+            snapshots_to_purge: vec![snap1],
+            is_single: true,
+            existing_diff_dirs: HashSet::new(),
+        };
+
+        let single_summary = format_summary(&single_plan);
+        assert!(single_summary.contains("Action:               Single snapshot in range — alias / rename"));
+
+        let single_full = format_full_list(&single_plan);
+        assert!(single_full.contains("Rename snapshot 'snap2' → 'daily-single'"));
     }
 }
