@@ -185,27 +185,30 @@ pub fn rebuild_snapshot_catalog(
     Ok(sorted)
 }
 
-/// Save the snapshot catalog to `<remote>/.meta/snapshots.jsonl` (and `<remote>/.meta/snapshot.jsonl` if present).
-pub fn save_snapshot_catalog(
+/// Save the snapshot catalog to a specific target path.
+pub fn save_snapshot_catalog_to(
     rclone: &Rclone,
-    remote_base: &str,
+    target_path: &str,
     catalog: &[SnapshotSummary],
 ) -> Result<()> {
-    let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
-    let alt_path = format!("{remote_base}/.meta/snapshot.jsonl");
     let mut lines = String::new();
     for entry in catalog {
         let line = serde_json::to_string(entry).map_err(IncrError::Json)?;
         lines.push_str(&line);
         lines.push('\n');
     }
-    rclone.rcat(&catalog_path, &lines)?;
-    if let Ok(c) = rclone.cat(&alt_path) {
-        if !c.trim().is_empty() {
-            let _ = rclone.rcat(&alt_path, &lines);
-        }
-    }
+    rclone.rcat(target_path, &lines)?;
     Ok(())
+}
+
+/// Save the snapshot catalog to `<remote>/.meta/snapshots.jsonl`.
+pub fn save_snapshot_catalog(
+    rclone: &Rclone,
+    remote_base: &str,
+    catalog: &[SnapshotSummary],
+) -> Result<()> {
+    let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
+    save_snapshot_catalog_to(rclone, &catalog_path, catalog)
 }
 
 /// Append or update a single snapshot in the remote catalog.
@@ -216,11 +219,11 @@ pub fn append_or_update_catalog_entry(
 ) -> Result<()> {
     let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
     let alt_path = format!("{remote_base}/.meta/snapshot.jsonl");
-    let content = match rclone.cat(&catalog_path) {
-        Ok(c) if !c.trim().is_empty() => Some(c),
+    let (active_path, content) = match rclone.cat(&catalog_path) {
+        Ok(c) if !c.trim().is_empty() => (catalog_path.clone(), Some(c)),
         _ => match rclone.cat(&alt_path) {
-            Ok(c) if !c.trim().is_empty() => Some(c),
-            _ => None,
+            Ok(c) if !c.trim().is_empty() => (alt_path.clone(), Some(c)),
+            _ => (catalog_path.clone(), None),
         },
     };
 
@@ -249,7 +252,11 @@ pub fn append_or_update_catalog_entry(
     entries.push(entry);
     entries.sort_by_key(|s| s.created_at);
 
-    save_snapshot_catalog(rclone, remote_base, &entries)
+    save_snapshot_catalog_to(rclone, &active_path, &entries)?;
+    if active_path == alt_path {
+        let _ = save_snapshot_catalog_to(rclone, &catalog_path, &entries);
+    }
+    Ok(())
 }
 
 /// Remove snapshots matching the given names or manifest stems from the remote catalog,
@@ -262,11 +269,11 @@ pub fn remove_from_catalog(
 ) -> Result<()> {
     let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
     let alt_path = format!("{remote_base}/.meta/snapshot.jsonl");
-    let content = match rclone.cat(&catalog_path) {
-        Ok(c) if !c.trim().is_empty() => Some(c),
+    let (active_path, content) = match rclone.cat(&catalog_path) {
+        Ok(c) if !c.trim().is_empty() => (catalog_path.clone(), Some(c)),
         _ => match rclone.cat(&alt_path) {
-            Ok(c) if !c.trim().is_empty() => Some(c),
-            _ => None,
+            Ok(c) if !c.trim().is_empty() => (alt_path.clone(), Some(c)),
+            _ => (catalog_path.clone(), None),
         },
     };
 
@@ -321,7 +328,11 @@ pub fn remove_from_catalog(
     };
 
     entries.sort_by_key(|s| s.created_at);
-    save_snapshot_catalog(rclone, remote_base, &entries)
+    save_snapshot_catalog_to(rclone, &active_path, &entries)?;
+    if active_path == alt_path {
+        let _ = save_snapshot_catalog_to(rclone, &catalog_path, &entries);
+    }
+    Ok(())
 }
 
 /// Atomically update catalog after compaction (removes purged snapshots and optionally adds new consolidated snapshot).
@@ -333,11 +344,11 @@ pub fn update_catalog_after_compaction(
 ) -> Result<()> {
     let catalog_path = format!("{remote_base}/.meta/snapshots.jsonl");
     let alt_path = format!("{remote_base}/.meta/snapshot.jsonl");
-    let content = match rclone.cat(&catalog_path) {
-        Ok(c) if !c.trim().is_empty() => Some(c),
+    let (active_path, content) = match rclone.cat(&catalog_path) {
+        Ok(c) if !c.trim().is_empty() => (catalog_path.clone(), Some(c)),
         _ => match rclone.cat(&alt_path) {
-            Ok(c) if !c.trim().is_empty() => Some(c),
-            _ => None,
+            Ok(c) if !c.trim().is_empty() => (alt_path.clone(), Some(c)),
+            _ => (catalog_path.clone(), None),
         },
     };
 
@@ -379,7 +390,11 @@ pub fn update_catalog_after_compaction(
     }
 
     entries.sort_by_key(|s| s.created_at);
-    save_snapshot_catalog(rclone, remote_base, &entries)
+    save_snapshot_catalog_to(rclone, &active_path, &entries)?;
+    if active_path == alt_path {
+        let _ = save_snapshot_catalog_to(rclone, &catalog_path, &entries);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

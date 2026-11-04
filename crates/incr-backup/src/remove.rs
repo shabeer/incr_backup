@@ -628,7 +628,7 @@ fn run_remove_snapshots_inner(
 
     if !diff_dirs_clean.is_empty() {
         use rayon::prelude::*;
-        let num_threads = std::cmp::min(8, diff_dirs_clean.len());
+        let num_threads = std::cmp::min(16, diff_dirs_clean.len());
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build()

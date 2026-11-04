@@ -142,9 +142,38 @@ impl Rclone {
         self.lsjson(remote_path, true, true)
     }
 
+    /// Build command arguments for `rclone lsjson` with filters.
+    pub fn lsjson_filtered_args(
+        remote_path: &str,
+        recursive: bool,
+        with_hash: bool,
+        includes: &[String],
+        include_from_path: Option<&str>,
+    ) -> Vec<String> {
+        let mut args = Self::lsjson_args(remote_path, recursive, with_hash);
+        // Exclude tombstoned directories so rclone immediately prunes recursion into them
+        args.push("--exclude".to_string());
+        args.push("/*_deleted/**".to_string());
+        args.push("--exclude".to_string());
+        args.push("/*_deleted".to_string());
+
+        if let Some(path) = include_from_path {
+            args.push("--include-from".to_string());
+            args.push(path.to_string());
+        } else {
+            for inc in includes {
+                args.push("--include".to_string());
+                args.push(inc.clone());
+            }
+        }
+        args
+    }
+
     /// Run `rclone lsjson <remote_path> [--recursive] [--fast-list] [--hash] [--include <pattern>...]`.
     ///
     /// Scopes the listing to files matching the provided include patterns.
+    /// Excludes tombstoned directories (`/*_deleted/**`) to prevent rclone from recursing
+    /// into dead snapshots.
     /// Always executes (even in dry-run mode) since it's read-only.
     pub fn lsjson_filtered(
         &self,
@@ -153,7 +182,6 @@ impl Rclone {
         with_hash: bool,
         includes: &[String],
     ) -> Result<String> {
-        let mut args = Self::lsjson_args(remote_path, recursive, with_hash);
         if includes.len() > 4 {
             use std::io::Write;
             let mut temp = tempfile::NamedTempFile::new().map_err(IncrError::Io)?;
@@ -162,14 +190,22 @@ impl Rclone {
             }
             temp.flush().map_err(IncrError::Io)?;
             let temp_path = temp.path().to_string_lossy().to_string();
-            args.push("--include-from".to_string());
-            args.push(temp_path);
+            let args = Self::lsjson_filtered_args(
+                remote_path,
+                recursive,
+                with_hash,
+                &[],
+                Some(&temp_path),
+            );
             self.run_rclone(&args, /* is_mutating */ false)
         } else {
-            for inc in includes {
-                args.push("--include".to_string());
-                args.push(inc.clone());
-            }
+            let args = Self::lsjson_filtered_args(
+                remote_path,
+                recursive,
+                with_hash,
+                includes,
+                None,
+            );
             self.run_rclone(&args, /* is_mutating */ false)
         }
     }
@@ -742,6 +778,41 @@ mod tests {
         assert!(!args.contains(&"--fast-list".to_string()));
         assert!(!args.contains(&"--hash".to_string()));
         assert!(args.contains(&"--no-mimetype".to_string()));
+    }
+
+    #[test]
+    fn test_lsjson_filtered_args_excludes_tombstone_dirs() {
+        let includes = vec!["/snap1/**".to_string(), "/snap2/**".to_string()];
+        let args = Rclone::lsjson_filtered_args("remote:diffs", true, true, &includes, None);
+
+        // Exclude rules must be present
+        assert!(args.contains(&"--exclude".to_string()));
+        assert!(args.contains(&"/*_deleted/**".to_string()));
+        assert!(args.contains(&"/*_deleted".to_string()));
+
+        // Exclude rules must precede includes
+        let exclude_idx = args.iter().position(|a| a == "/*_deleted/**").unwrap();
+        let include_idx = args.iter().position(|a| a == "/snap1/**").unwrap();
+        assert!(exclude_idx < include_idx);
+    }
+
+    #[test]
+    fn test_lsjson_filtered_args_with_include_from() {
+        let args = Rclone::lsjson_filtered_args(
+            "remote:diffs",
+            true,
+            false,
+            &[],
+            Some("/tmp/includes.txt"),
+        );
+        assert!(args.contains(&"--exclude".to_string()));
+        assert!(args.contains(&"/*_deleted/**".to_string()));
+        assert!(args.contains(&"--include-from".to_string()));
+        assert!(args.contains(&"/tmp/includes.txt".to_string()));
+
+        let exclude_idx = args.iter().position(|a| a == "/*_deleted/**").unwrap();
+        let inc_from_idx = args.iter().position(|a| a == "--include-from").unwrap();
+        assert!(exclude_idx < inc_from_idx);
     }
 }
 

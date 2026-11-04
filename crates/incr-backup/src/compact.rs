@@ -1184,7 +1184,9 @@ fn execute_compact_plan(
     }
 
     // Consolidated snapshot is now fully active!
-    let _ = rclone.delete_file(&staging_journal);
+    if !plan.files_to_keep.is_empty() {
+        let _ = rclone.delete_file(&staging_journal);
+    }
 
     // Step 4: Delete source snapshots manifests and tombstone their diffs
     info!(
@@ -1248,7 +1250,7 @@ fn execute_compact_plan(
         );
 
         use rayon::prelude::*;
-        let num_threads = std::cmp::min(8, diff_dirs_to_tombstone.len());
+        let num_threads = std::cmp::min(16, diff_dirs_to_tombstone.len());
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build()
