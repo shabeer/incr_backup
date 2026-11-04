@@ -620,34 +620,61 @@ fn run_remove_snapshots_inner(
     }
 
     // Step 7: Rename physical diff directories on remote to tombstone for later GC
-    for dir in &diff_dirs_to_purge {
-        let clean_dir = dir.trim_matches('/');
-        if !crate::snapshot::is_tombstone_diff_dir(clean_dir) {
-            let diff_path = format!("{remote_clean}/diffs/{clean_dir}");
-            let tombstone_path = format!("{remote_clean}/diffs/{clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
-            info!("Renaming diff directory to tombstone: {clean_dir} -> {clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
-            if let Err(e) = rclone.moveto(&diff_path, &tombstone_path) {
-                warn!("Failed to rename diff directory {clean_dir} to tombstone ({e}). Falling back to delete...");
-                if let Err(e2) = rclone.delete(&diff_path, &[]) {
-                    warn!("Failed to delete files in diff directory {}: {}", diff_path, e2);
+    let diff_dirs_clean: Vec<String> = diff_dirs_to_purge
+        .iter()
+        .map(|d| d.trim_matches('/').to_string())
+        .filter(|d| !crate::snapshot::is_tombstone_diff_dir(d))
+        .collect();
+
+    if !diff_dirs_clean.is_empty() {
+        use rayon::prelude::*;
+        let num_threads = std::cmp::min(8, diff_dirs_clean.len());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .map_err(|e| IncrError::CompactionError(format!("Failed to create thread pool: {e}")))?;
+
+        pool.install(|| {
+            diff_dirs_clean.par_iter().for_each(|clean_dir| {
+                let diff_path = format!("{remote_clean}/diffs/{clean_dir}");
+                let tombstone_path = format!("{remote_clean}/diffs/{clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
+                info!("Renaming diff directory to tombstone: {clean_dir} -> {clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
+                if let Err(e) = rclone.moveto(&diff_path, &tombstone_path) {
+                    if let IncrError::RcloneFailed { code: 3, .. } = e {
+                        debug!("Diff directory {clean_dir} already absent (exit 3); skipping fallback.");
+                    } else {
+                        warn!("Failed to rename diff directory {clean_dir} to tombstone ({e}). Falling back to delete...");
+                        if let Err(e2) = rclone.delete(&diff_path, &[]) {
+                            warn!("Failed to delete files in diff directory {}: {}", diff_path, e2);
+                        }
+                        if let Err(e2) = rclone.rmdir_specific(&diff_path) {
+                            warn!(
+                                "[WARN] Could not remove empty diff directory '{}' ({e2}). Please manually remove it if needed: rclone rmdirs \"{}\"",
+                                diff_path, diff_path
+                            );
+                        }
+                    }
                 }
-                if let Err(e2) = rclone.rmdir_specific(&diff_path) {
-                    warn!(
-                        "[WARN] Could not remove empty diff directory '{}' ({e2}). Please manually remove it if needed: rclone rmdirs \"{}\"",
-                        diff_path, diff_path
-                    );
-                }
+            });
+        });
+    }
+
+    // Step 8: Delete manifests of removed snapshots (batch deletion with fallback)
+    let manifests_dir = format!("{remote_clean}/.meta/manifests");
+    let manifest_files: Vec<String> = to_remove.iter().map(|s| s.manifest_name.clone()).collect();
+    if !manifest_files.is_empty() {
+        debug!("Batch deleting {} obsolete snapshot manifests...", manifest_files.len());
+        if let Err(e) = rclone.delete_files_from(&manifests_dir, &manifest_files) {
+            warn!("Batch manifest deletion failed ({e}). Falling back to sequential deletefile...");
+            for snap in &to_remove {
+                let manifest_file_path = format!("{manifests_dir}/{}", snap.manifest_name);
+                let _ = rclone.delete_file(&manifest_file_path);
             }
         }
     }
 
-    // Step 8: Delete manifests of removed snapshots
-    let manifests_dir = format!("{remote_clean}/.meta/manifests/");
     let mut names_to_remove = HashSet::new();
     for snap in &to_remove {
-        let manifest_file_path = format!("{manifests_dir}{}", snap.manifest_name);
-        debug!("Deleting manifest {}", manifest_file_path);
-        rclone.delete_file(&manifest_file_path)?;
         names_to_remove.insert(snap.name.clone());
         names_to_remove.insert(snap.manifest_name.clone());
         names_to_remove.insert(snap.manifest_name.trim_end_matches(".json").to_string());

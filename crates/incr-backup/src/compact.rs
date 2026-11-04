@@ -104,6 +104,7 @@ pub struct CompactPlan {
     pub files_to_discard: Vec<DiscardFilePlan>,
     pub snapshots_to_purge: Vec<SnapshotMeta>,
     pub is_single: bool,
+    pub existing_diff_dirs: HashSet<String>,
 }
 
 /// Summary result of a completed compaction.
@@ -404,6 +405,7 @@ pub fn build_compact_plan_with_times(
             files_to_discard: Vec::new(),
             snapshots_to_purge: vec![single],
             is_single: true,
+            existing_diff_dirs: HashSet::new(),
         });
     }
 
@@ -478,6 +480,7 @@ pub fn build_compact_plan_with_times(
     }
 
     let mut diff_files: Vec<RawDiffFile> = Vec::new();
+    let mut existing_diff_dirs: HashSet<String> = HashSet::new();
 
     // Map each in-range diff directory to its (snapshot_name, snapshot_index)
     let in_range_diff_dirs: HashMap<String, (String, usize)> = in_range
@@ -497,10 +500,20 @@ pub fn build_compact_plan_with_times(
             .map(|dir| format!("/{dir}/**"))
             .collect();
 
-        let batch_scanned = match rclone.lsjson_filtered(&diffs_root, true, true, &include_patterns) {
+        // If prev is None (beginning of history), all intra-range diff files are guaranteed to be
+        // discarded (no snapshots exist prior to the range). Skipping hash computation reduces
+        // cloud metadata latency substantially.
+        let with_hash = prev.is_some();
+
+        let batch_scanned = match rclone.lsjson_filtered(&diffs_root, true, with_hash, &include_patterns) {
             Ok(lsjson) => {
                 if let Ok(entries) = serde_json::from_str::<Vec<LsjsonFileEntry>>(&lsjson) {
                     for entry in entries {
+                        let top_dir = entry.path.split('/').next().unwrap_or(&entry.path);
+                        if !top_dir.is_empty() {
+                            existing_diff_dirs.insert(top_dir.to_string());
+                        }
+
                         if entry.is_dir {
                             continue;
                         }
@@ -545,6 +558,7 @@ pub fn build_compact_plan_with_times(
                     let diff_path = format!("{remote_base}/diffs/{dir}/");
                     if let Ok(lsjson) = rclone.lsjson_recursive_hash(&diff_path) {
                         if let Ok(entries) = serde_json::from_str::<Vec<LsjsonFileEntry>>(&lsjson) {
+                            existing_diff_dirs.insert(dir.clone());
                             for entry in entries {
                                 if entry.is_dir {
                                     continue;
@@ -675,6 +689,7 @@ pub fn build_compact_plan_with_times(
         files_to_discard,
         snapshots_to_purge: in_range,
         is_single: false,
+        existing_diff_dirs,
     })
 }
 
@@ -964,12 +979,10 @@ fn execute_compact_plan(
             }
         }
         let _ = rclone.delete_file(&staging_journal);
+        let _ = rclone.delete(&staging_dir, &[]);
+        let _ = rclone.rmdir_specific(&staging_dir);
+        let _ = rclone.delete_file(&staging_manifest);
     }
-
-    // Clean up any remaining empty staging from aborted previous runs
-    let _ = rclone.delete(&staging_dir, &[]);
-    let _ = rclone.rmdir_specific(&staging_dir);
-    let _ = rclone.delete_file(&staging_manifest);
 
     info!(
         "Stage 1: Staging {} diff files for '{}'...",
@@ -1166,8 +1179,6 @@ fn execute_compact_plan(
         // Move staging directory to final diffs/<name>
         rclone.moveto(&staging_dir.trim_end_matches('/'), &final_diff_dir)?;
     } else {
-        let _ = rclone.delete(&staging_dir, &[]);
-        let _ = rclone.rmdir_specific(&staging_dir);
         // Ensure 1:1 correspondence: create empty diff directory for the consolidated snapshot
         let _ = rclone.mkdir(&final_diff_dir);
     }
@@ -1181,24 +1192,92 @@ fn execute_compact_plan(
         plan.snapshots_to_purge.len()
     );
 
+    // 4a. Batch delete obsolete snapshot manifests in one shot
+    let manifests_dir = format!("{remote_base}/.meta/manifests");
+    let manifest_files: Vec<String> = plan
+        .snapshots_to_purge
+        .iter()
+        .map(|s| s.manifest_name.clone())
+        .collect();
+
+    if !manifest_files.is_empty() {
+        debug!(
+            "Batch deleting {} obsolete snapshot manifests...",
+            manifest_files.len()
+        );
+        if let Err(e) = rclone.delete_files_from(&manifests_dir, &manifest_files) {
+            warn!(
+                "Batch manifest deletion failed ({e}). Falling back to sequential deletefile..."
+            );
+            for name in &manifest_files {
+                let old_manifest = format!("{manifests_dir}/{name}");
+                let _ = rclone.delete_file(&old_manifest);
+            }
+        }
+    }
+
+    // 4b. Collect unique obsolete diff directories to tombstone
+    let mut diff_dirs_to_tombstone: Vec<String> = Vec::new();
+    let mut seen_dirs = HashSet::new();
+
     for snap in &plan.snapshots_to_purge {
         if let Some(ref dir) = snap.diff_dir {
-            let clean_dir = dir.trim_matches('/');
-            if !crate::snapshot::is_tombstone_diff_dir(clean_dir) {
-                let old_diff = format!("{remote_base}/diffs/{clean_dir}");
-                let tombstone = format!("{remote_base}/diffs/{clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
-                info!("Renaming obsolete diff directory {clean_dir} -> {clean_dir}{}", crate::snapshot::DELETED_SUFFIX);
-                if let Err(e) = rclone.moveto(&old_diff, &tombstone) {
-                    warn!(
-                        "Failed to rename diffs/{clean_dir} to tombstone ({e}). Falling back to delete + rmdir_specific..."
+            let clean_dir = dir.trim_matches('/').to_string();
+            if clean_dir != plan.name && !crate::snapshot::is_tombstone_diff_dir(&clean_dir) {
+                // If existing_diff_dirs is known, check against it to avoid exit 3 penalties
+                if plan.existing_diff_dirs.is_empty()
+                    || plan.existing_diff_dirs.contains(&clean_dir)
+                {
+                    if seen_dirs.insert(clean_dir.clone()) {
+                        diff_dirs_to_tombstone.push(clean_dir);
+                    }
+                } else {
+                    debug!(
+                        "Diff directory '{clean_dir}' does not exist on remote; skipping tombstone rename."
                     );
-                    let _ = rclone.delete(&old_diff, &[]);
-                    let _ = rclone.rmdir_specific(&old_diff);
                 }
             }
         }
-        let old_manifest = format!("{remote_base}/.meta/manifests/{}", snap.manifest_name);
-        let _ = rclone.delete_file(&old_manifest);
+    }
+
+    // 4c. Concurrently rename obsolete diff directories to *_deleted
+    if !diff_dirs_to_tombstone.is_empty() {
+        info!(
+            "Tombstoning {} obsolete diff directories concurrently...",
+            diff_dirs_to_tombstone.len()
+        );
+
+        use rayon::prelude::*;
+        let num_threads = std::cmp::min(8, diff_dirs_to_tombstone.len());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .map_err(|e| IncrError::CompactionError(format!("Failed to create thread pool: {e}")))?;
+
+        pool.install(|| {
+            diff_dirs_to_tombstone.par_iter().for_each(|clean_dir| {
+                let old_diff = format!("{remote_base}/diffs/{clean_dir}");
+                let tombstone = format!(
+                    "{remote_base}/diffs/{clean_dir}{}",
+                    crate::snapshot::DELETED_SUFFIX
+                );
+                info!(
+                    "Renaming obsolete diff directory {clean_dir} -> {clean_dir}{}",
+                    crate::snapshot::DELETED_SUFFIX
+                );
+                if let Err(e) = rclone.moveto(&old_diff, &tombstone) {
+                    if let IncrError::RcloneFailed { code: 3, .. } = e {
+                        debug!("Diff directory {clean_dir} already absent (exit 3); skipping fallback.");
+                    } else {
+                        warn!(
+                            "Failed to rename diffs/{clean_dir} to tombstone ({e}). Falling back to delete + rmdir_specific..."
+                        );
+                        let _ = rclone.delete(&old_diff, &[]);
+                        let _ = rclone.rmdir_specific(&old_diff);
+                    }
+                }
+            });
+        });
     }
 
     // Update remote catalog

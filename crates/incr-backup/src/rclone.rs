@@ -154,11 +154,24 @@ impl Rclone {
         includes: &[String],
     ) -> Result<String> {
         let mut args = Self::lsjson_args(remote_path, recursive, with_hash);
-        for inc in includes {
-            args.push("--include".to_string());
-            args.push(inc.clone());
+        if includes.len() > 4 {
+            use std::io::Write;
+            let mut temp = tempfile::NamedTempFile::new().map_err(IncrError::Io)?;
+            for inc in includes {
+                writeln!(temp, "{inc}").map_err(IncrError::Io)?;
+            }
+            temp.flush().map_err(IncrError::Io)?;
+            let temp_path = temp.path().to_string_lossy().to_string();
+            args.push("--include-from".to_string());
+            args.push(temp_path);
+            self.run_rclone(&args, /* is_mutating */ false)
+        } else {
+            for inc in includes {
+                args.push("--include".to_string());
+                args.push(inc.clone());
+            }
+            self.run_rclone(&args, /* is_mutating */ false)
         }
-        self.run_rclone(&args, /* is_mutating */ false)
     }
 
     /// Run `rclone move source dest [--exclude ...] [--delete-empty-src-dirs]`.
@@ -226,6 +239,42 @@ impl Rclone {
             "move".to_string(),
             source.to_string(),
             dest.to_string(),
+            "--files-from".to_string(),
+            temp_path,
+            "--transfers".to_string(),
+            "8".to_string(),
+            "--checkers".to_string(),
+            "8".to_string(),
+        ];
+
+        self.run_rclone(&args, /* is_mutating */ true)
+    }
+
+    /// Run `rclone delete <remote_dir> --files-from <temp_file> --transfers 8 --checkers 8`.
+    ///
+    /// Deletes a batch of files under `remote_dir` using a file list.
+    /// Used during compaction and snapshot pruning to delete multiple manifest files in a single invocation.
+    pub fn delete_files_from(
+        &self,
+        remote_dir: &str,
+        relative_files: &[String],
+    ) -> Result<String> {
+        if relative_files.is_empty() {
+            return Ok(String::new());
+        }
+
+        use std::io::Write;
+        let mut temp = tempfile::NamedTempFile::new().map_err(IncrError::Io)?;
+        for file in relative_files {
+            writeln!(temp, "{file}").map_err(IncrError::Io)?;
+        }
+        temp.flush().map_err(IncrError::Io)?;
+
+        let temp_path = temp.path().to_string_lossy().to_string();
+
+        let args = vec![
+            "delete".to_string(),
+            remote_dir.to_string(),
             "--files-from".to_string(),
             temp_path,
             "--transfers".to_string(),
@@ -657,6 +706,15 @@ mod tests {
         let rclone = Rclone::new(&config);
         let files = vec!["file1.txt".to_string(), "subdir/file2.txt".to_string()];
         let result = rclone.move_files_from("remote:src", "remote:dst", &files);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dry_run_delete_files_from_returns_ok() {
+        let config = test_config();
+        let rclone = Rclone::new(&config);
+        let files = vec!["manifest1.json".to_string(), "manifest2.json".to_string()];
+        let result = rclone.delete_files_from("remote:manifests", &files);
         assert!(result.is_ok());
     }
 

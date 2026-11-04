@@ -165,20 +165,29 @@ Ensure mutating/querying rclone operations against Google Drive include optimize
 
 ---
 
-## 5. Implementation Roadmap
+## 5. Implementation Roadmap & Status
 
-1. **Add `move_files_from` helper in `rclone.rs`**:
-   - Accepts source dir, destination dir, and slice of relative file paths.
-   - Writes file paths to a temporary file (or pipes via `--files-from-raw`).
-   - Invokes `rclone move <src> <dst> --files-from <temp_file> --fast-list --transfers 8 --checkers 8`.
-2. **Refactor Stage 1 Staging in `compact.rs`**:
-   - Group `plan.files_to_keep` by `file.source_diff_dir`.
-   - Iterate over unique source directories and call `move_files_from`.
-   - Update rollback logic to leverage symmetrical batched moves.
-3. **Refactor Planning Diff Discovery via `snapshot.jsonl`**:
-   - Extract in-range snapshot `diff_dir` names from the already-loaded `snapshot.jsonl`.
-   - Execute a single filtered `lsjson` against `diffs/` using the cataloged diff directories.
-4. **Implement Resilient Purge with Fallback & Circuit Breaker**:
-   - Implement `purge_dir(&self, dir: &str) -> Result<()>` without filter flags.
-   - Implement fallback to `delete` + `rmdir_specific` on error with `warn!` logging.
-   - Add circuit breaker tracking consecutive errors across snapshot purges.
+### Phase 1: Core Staging & Discovery (Completed)
+1. **Added `move_files_from` helper in `rclone.rs`**:
+   - Writes file paths to a temporary file and invokes `rclone move <src> <dst> --files-from <temp_file>`.
+2. **Refactored Stage 1 Staging in `compact.rs`**:
+   - Groups `plan.files_to_keep` by `file.source_diff_dir` into batch moves.
+   - Symmetrical batch rollback journal.
+3. **Refactored Planning Diff Discovery**:
+   - Uses `lsjson_filtered` targeting in-range snapshot diff directories from the catalog.
+
+### Phase 2: Stage 4 Tombstoning & Clean-up Scaling (Completed)
+1. **Batched Manifest Deletion (`delete_files_from`)**:
+   - Replaced serial manifest deletion (`N` individual `deletefile` CLI calls) with a single invocation of `rclone delete <remote>/.meta/manifests/ --files-from <temp_file>`.
+   - Applied across both `compact` Stage 4 and `remove_snapshots`.
+2. **Concurrent Directory Tombstoning (`rayon`)**:
+   - Parallelized `rclone moveto diffs/<snap> diffs/<snap>_deleted` across up to 8 worker threads using `rayon`.
+   - Prevents `O(N)` serial process spawn latency.
+3. **Existence-Aware Tombstoning & Exit 3 Handling**:
+   - Recorded `existing_diff_dirs` during initial `lsjson` scan; snapshots without physical diff directories are skipped up front.
+   - Handled exit code 3 (`Directory not found`) as already absent, eliminating redundant `delete` + `rmdirs` fallback penalties.
+4. **Optimized Large-Scale `lsjson_filtered`**:
+   - Switched to `--include-from <temp_file>` when include patterns exceed 4, avoiding CLI buffer limits and flag parsing overhead.
+   - Conditioned hash computation on `prev.is_some()`; when `prev` is `None`, MD5 hash fetching is bypassed since all intra-range diffs are discarded.
+5. **Guarded Staging Cleanup**:
+   - Eliminated redundant pre-staging and post-commit cleanup calls when 0 diff files are kept or when no prior crash journal exists.
