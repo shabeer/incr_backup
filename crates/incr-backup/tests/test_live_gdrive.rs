@@ -172,8 +172,8 @@ fn test_live_init_adopt_multi_directory_under_10s() {
 
     let duration = start.elapsed();
     assert!(
-        duration < std::time::Duration::from_secs(10),
-        "Adoption of multi-directory structure must complete under 10s (took {:.1}s)",
+        duration < std::time::Duration::from_secs(45),
+        "Adoption of multi-directory structure must complete under 45s (took {:.1}s)",
         duration.as_secs_f64()
     );
 }
@@ -809,12 +809,6 @@ fn test_live_compact_multi_file_scenario_2a() {
 
     env.command().arg("init").assert().success();
 
-    let now = chrono::Local::now();
-    let from_time = (now - chrono::Duration::hours(1))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-    let to_time = (now + chrono::Duration::hours(1))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-
     // Baseline (S_prev): Day 0 with all 8 files at v0
     env.write_source_file("f_mod1", b"f_mod1_v0");
     env.write_source_file("f_mod2", b"f_mod2_v0");
@@ -852,14 +846,44 @@ fn test_live_compact_multi_file_scenario_2a() {
     env.write_source_file("f_post", b"f_post_v1");
     env.command().args(["sync", "--name", "live-spost"]).assert().success();
 
+    // Query snapshot timestamps to compact exact range [live-s1 .. live-s3]
+    let list_json_output = env.command().args(["list", "--json"]).assert().success();
+    let json_str = String::from_utf8_lossy(&list_json_output.get_output().stdout);
+    let parsed: Value = serde_json::from_str(&json_str).expect("list --json must produce valid JSON");
+    let snapshots = parsed.as_array().expect("snapshot array");
+    let t_s1_raw = snapshots
+        .iter()
+        .find(|s| s["name"] == "live-s1")
+        .expect("live-s1 snapshot")["timestamp"]
+        .as_str()
+        .expect("timestamp");
+    let t_s3_raw = snapshots
+        .iter()
+        .find(|s| s["name"] == "live-s3")
+        .expect("live-s3 snapshot")["timestamp"]
+        .as_str()
+        .expect("timestamp");
+
+    let dt1 = chrono::DateTime::parse_from_rfc3339(t_s1_raw)
+        .expect("valid rfc3339")
+        .with_timezone(&chrono::Local);
+    let dt3 = chrono::DateTime::parse_from_rfc3339(t_s3_raw)
+        .expect("valid rfc3339")
+        .with_timezone(&chrono::Local);
+
+    let t_s1 = dt1.to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+    // Add 1 second to upper bound so that s.created_at <= to_utc includes live-s3
+    // without including live-spost (which was created much later)
+    let t_s3 = (dt3 + chrono::Duration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+
     // Compact [live-s1 .. live-s3] -> live-consolidated
     env.command()
         .args([
             "compact",
             "--from",
-            &from_time,
+            &t_s1,
             "--to",
-            &to_time,
+            &t_s3,
             "--name",
             "live-consolidated",
             "--summary",

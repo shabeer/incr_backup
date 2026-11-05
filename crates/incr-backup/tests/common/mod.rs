@@ -82,6 +82,8 @@ impl TestEnv {
     }
 }
 
+static LIVE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Live Google Drive test environment backed by real cloud storage.
 ///
 /// Loads configuration from `tests/incr-backup-testing.toml` and creates an isolated
@@ -107,6 +109,8 @@ pub struct LiveGdriveTestEnv {
     pub timezone: String,
     /// Keep remote files for manual post-mortem inspection if set to true.
     pub keep_remote: bool,
+    /// Serializes live remote tests so they do not hammer or rate-limit Google Drive API concurrently.
+    pub _lock_guard: Option<std::sync::MutexGuard<'static, ()>>,
 }
 
 #[allow(dead_code)]
@@ -196,6 +200,8 @@ impl LiveGdriveTestEnv {
         let remote_clean = base_remote.trim_end_matches('/');
         let test_remote = format!("{}/live_{}_{}_{}", remote_clean, test_name, timestamp, pid);
 
+        let lock_guard = LIVE_TEST_LOCK.lock().ok();
+
         Some(Self {
             temp_dir,
             source_path,
@@ -206,6 +212,7 @@ impl LiveGdriveTestEnv {
             rclone_flags,
             timezone: config.timezone.to_string(),
             keep_remote: false,
+            _lock_guard: lock_guard,
         })
     }
 
