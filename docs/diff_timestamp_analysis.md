@@ -98,9 +98,9 @@ Timeline:
 
 ---
 
-## 5. Concrete Walkthrough: Compaction & Consolidation Under Model B
+## 5. Compaction & Consolidation: The Version Collision Dilemma
 
-To see exactly how compaction operates under Model B, consider 3 files across 5 sync runs:
+To understand how compaction operates under Model B and expose a critical architectural question, consider 3 files across 5 sync runs:
 * **`report.docx`**: Edited repeatedly across runs.
 * **`budget.xlsx`**: Edited once at $T_1$, then unchanged.
 * **`logo.png`**: Baseline asset, never modified.
@@ -116,6 +116,8 @@ To see exactly how compaction operates under Model B, consider 3 files across 5 
 | **$T_4$ (Oct 29 12:00)** | Modified to $V_D$ | $V_2$ *(no change)* | $V_L$ *(no change)* | `diffs/T3/` receives **`report.docx` ($V_C$)** |
 | **Now ($T_4$ Active)** | In `current/`: **$V_D$** | In `current/`: **$V_2$** | In `current/`: **$V_L$** | `current.json` reflects $T_4$ |
 
+---
+
 ### Executing Compaction on Range $[T_1, T_3]$
 We run compaction to collapse all runs on Oct 28 into a single daily snapshot:
 ```bash
@@ -126,40 +128,83 @@ incr-backup compact \
 ```
 The snapshots in this range are: $T_1$, $T_2$, and $T_3$.
 The anchor snapshot is $T_3$ (newest in range).
+The consolidated manifest adopts $T_3$: `report.docx` = $V_C$, `budget.xlsx` = $V_2$, `logo.png` = $V_L$.
 
-#### Step 1: Manifest Selection
-The consolidated snapshot adopts the manifest of $T_3$:
-- `report.docx` = $V_C$
-- `budget.xlsx` = $V_2$
-- `logo.png` = $V_L$
+Now examine the diff directories being combined: `diffs/T1/`, `diffs/T2/`, and `diffs/T3/`:
+- `diffs/T1/` contains `report.docx` ($V_A$).
+- `diffs/T2/` contains `report.docx` ($V_B$).
+- `diffs/T3/` contains `report.docx` ($V_C$).
 
-#### Step 2: Evaluating Diff Files to Keep vs. Discard
-The diff directories corresponding to the in-range snapshots are `diffs/T1/`, `diffs/T2/`, and `diffs/T3/`:
+---
 
-1. **`diffs/T1/report.docx` ($V_A$):**
-   - *Who needs $V_A$?* Snapshot $T_0$ needs $V_A$! (At $T_0$, `report.docx` was $V_A$).
-   - Since $T_0$ sits before the compaction range, it must remain restorable.
-   - **Verdict: KEEP.** Preserved in `diffs/daily-2026-10-28/report.docx`.
+### The Fundamental Question: Which Version Goes into `diffs/daily-2026-10-28/`?
 
-2. **`diffs/T2/report.docx` ($V_B$):**
-   - *Who needs $V_B$?* No surviving snapshot needs $V_B$. $T_0$ needs $V_A$, and $T_3$ has $V_C$. $V_B$ was an intermediate edit between 14:00 and 20:00.
-   - **Verdict: DISCARD.** Reclaimed as freed space.
+> **"How can multiple versions $V_A$ and $V_C$ be stored? In a standard directory structure, `diffs/daily-2026-10-28/report.docx` is a single file path. If only one can be stored, should it be $V_A$ or $V_C$?"**
 
-3. **`diffs/T3/report.docx` ($V_C$):**
-   - *Who needs $V_C$?* When $T_4$ ran, $V_C$ was displaced from $T_3$. If anyone later restores the consolidated snapshot `daily-2026-10-28` (which represents the state at $T_3$), they need $V_C$!
-   - **Verdict: KEEP.** Preserved in `diffs/daily-2026-10-28/report.docx` as the diff version for the consolidated snapshot.
+This exposes a fundamental tension in reverse-incremental compaction under Model B:
 
-#### Summary of Compaction Action:
-- **Consolidated Manifest:** `.meta/manifests/daily-2026-10-28.json` (cloned from $T_3$).
-- **Consolidated Diff Directory:** `diffs/daily-2026-10-28/` containing `report.docx` ($V_A$ and $V_C$).
-- **Purged:** `manifests/T1.json`, `manifests/T2.json`, `manifests/T3.json`, and directories `diffs/T1`, `diffs/T2`, `diffs/T3`.
-- **Pre-range integrity preserved:** $T_0$ restores `report.docx` ($V_A$) from `diffs/daily-2026-10-28/`, `budget.xlsx` ($V_1$) from `diffs/T0/`, and `logo.png` from `current/`.
+#### Why Both Versions Seem to be Needed:
+1. **$V_A$ is needed by Pre-Range Snapshots ($T_0$):**
+   - At Day 1 ($T_0$), `report.docx` was $V_A$.
+   - Because $T_1$ did not modify `report.docx`, $V_A$ was displaced only when moving from $T_1 \to T_2$ (sitting in `diffs/T1/`).
+   - If $V_A$ is discarded, **$T_0$ can never be restored!**
+2. **$V_C$ is needed by the Consolidated Snapshot ($T_3$ / `daily-2026-10-28`):**
+   - At Day 2 ($T_3$), `report.docx` was $V_C$.
+   - When $T_4$ ran on Day 3, $V_C$ was displaced into `diffs/T3/`.
+   - If $V_C$ is discarded, **`daily-2026-10-28` can never be restored!** (Because `current/` now has $V_D$).
+
+#### The Dilemma:
+A single file path `diffs/daily-2026-10-28/report.docx` **cannot hold both $V_A$ and $V_C$**:
+- **If you store $V_A$:** `daily-2026-10-28` loses $V_C$. Point-in-time recovery for the consolidated snapshot fails.
+- **If you store $V_C$:** $T_0$ loses $V_A$. Point-in-time recovery for the historical baseline fails.
+
+---
+
+### Why Model A (Event Model) Does NOT Have This Conflict
+
+In Model A, diff directories are stamped with the **event that created the diff (destination timestamp)**:
+- At $T_2$, displaced $V_A$ went to `diffs/snap-14:00/` (inside Day 2).
+- At $T_3$, displaced $V_B$ went to `diffs/snap-20:00/` (inside Day 2).
+- At $T_4$, displaced $V_C$ went to `diffs/snap-12:00/` (**on Day 3, outside the compaction range!**).
+
+When compacting Day 2 $[T_1, T_3]$ under Model A:
+- `diffs/snap-12:00/` (Day 3) is **outside the range** and untouched. It continues to hold $V_C$.
+- The only versions inside the range are $V_A$ and $V_B$.
+- The consolidation rule is simple: keep the earliest version needed by $S_{prev}$ ($V_A$) and discard $V_B$.
+- **Result in Model A:**
+  - `diffs/daily-2026-10-28/report.docx` holds **$V_A$** (for $T_0$).
+  - `diffs/snap-12:00/report.docx` holds **$V_C$** (for $T_3$).
+  - **No path collision occurs.**
+
+---
+
+### How Can Model B Resolve This?
+
+For Model B to remain mathematically sound during compaction, it must resolve the two different roles that diffs play:
+
+#### Solution 1: Partitioning Backward Deltas vs. Exit Deltas (Recommended for Model B)
+Under Model B, `diffs/daily-2026-10-28/` represents the diff directory of the consolidated snapshot (the exit delta when moving from `daily` to $T_4$):
+1. **Exit Delta $\rightarrow$ Consolidated Diff Dir:**
+   - `diffs/T3/` holds files displaced when moving from $T_3 \to T_4$ ($V_C$).
+   - This directory is renamed/merged into **`diffs/daily-2026-10-28/`** $\rightarrow$ contains **$V_C$**.
+   - This ensures `daily-2026-10-28` can always be restored.
+2. **Backward Delta $\rightarrow$ Predecessor Snapshot Diff Dir:**
+   - $V_A$ was actually displaced from $T_0$ (because $T_1$ never modified it).
+   - $V_A$ is merged backwards into **`diffs/T0/`**!
+   - Now `diffs/T0/` contains both `budget.xlsx` ($V_1$) and `report.docx` ($V_A$).
+   - **Trade-off:** Compacting range $[T_1, T_3]$ must update the preceding snapshot's diff directory (`diffs/T0/`), modifying a directory outside the range.
+
+#### Solution 2: Multi-Version Suffixing in Consolidated Diff
+- In the consolidated diff folder, intermediate diff files needed by pre-range snapshots receive a version or snapshot hash suffix:
+  - `diffs/daily-2026-10-28/report.docx` ($V_C$, default restore for anchor).
+  - `diffs/daily-2026-10-28/report.docx__v_T1` ($V_A$, for $T_0$).
+- **Trade-off:** Requires manifest and restore logic to understand suffixed paths rather than direct mirror relative paths.
 
 ---
 
 ## 6. Named Snapshot Lifecycle & CLI Representation
 
-Custom named snapshots (e.g. `--name v2.0-pre-release`) integrate seamlessly into Model B:
+Custom named snapshots (e.g. `--name v2.0-pre-release`) integrate into Model B as follows:
 
 ### Execution Example
 1. **At 08:00Z:** Standard automated sync runs. `current/` is at state $T_1$.
@@ -214,11 +259,13 @@ In [`compact.rs#L249-L264`](file:///Users/shabeer/git/shabeer_incr_backup/crates
   };
   ```
 
-### 2. Diff File Classification Logic (`classify_diff_files`)
+### 2. Solving the Version Collision in `classify_diff_files`
 In [`compact.rs#L353-L435`](file:///Users/shabeer/git/shabeer_incr_backup/crates/incr-backup/src/compact.rs#L353-L435):
 - **In Model A:** The anchor snapshot $T_{anchor}$'s diff directory (`diffs/T_anchor`) held files displaced from $T_{anchor-1} \to T_{anchor}$. Files displaced *out* of $T_{anchor}$ lived in $T_{anchor+1}$'s diff directory (outside the range).
 - **In Model B:** Files displaced *out* of $T_{anchor}$ live in **`diffs/T_anchor`** (inside the range)!
-- **Required Update:** `classify_diff_files` must not discard diff files in `diffs/T_anchor` simply because they are not in $S_{prev}$. Any file in `diffs/T_anchor` that is part of the anchor snapshot's manifest must be retained for the consolidated snapshot to remain restorable against future modifications!
+- **Required Update:** As established in Section 5, `classify_diff_files` cannot place both the backward delta ($V_A$) and the exit delta ($V_C$) into `diffs/daily/`. It must either:
+  1. Route backward deltas into `diffs/S_prev/` (Solution 1), or
+  2. Maintain suffixed versions for pre-range references (Solution 2).
 
 ### 3. Compaction Range Validation
 - Compaction must validate that the range does not include the active snapshot represented by `current.json`.
@@ -273,11 +320,13 @@ In Section 4's walkthrough:
 
 ## 10. Limitations & Edge Cases
 
-1. **Unmanaged Repositories & `adopt`:**
+1. **Compaction Range Isolation Breakdown:**
+   - Because in-range diff directories contain both backward deltas and exit deltas, resolving path collisions ($V_A$ vs. $V_C$) requires updating `diffs/S_prev/` outside the range.
+2. **Unmanaged Repositories & `adopt`:**
    - If an existing directory on remote storage has files in `current/` but no `current.json`, `adopt` must synthesize an initial `current.json` with timestamp $T_{adopt}$ before any sync displacing files can occur.
-2. **Inability to Delete / Prune the Active Snapshot Directly:**
+3. **Inability to Delete / Prune the Active Snapshot Directly:**
    - `current/` is the full physical reference tree. Pruning the active snapshot requires a reverse-rollback: restoring the state of the latest archived snapshot into `current/` and dropping its diffs.
-3. **Operator Intuition Risk:**
+4. **Operator Intuition Risk:**
    - Operators must be reminded that `diffs/` contains reverse deltas, not standalone mirrors.
 
 ---
@@ -291,17 +340,21 @@ In Section 4's walkthrough:
 | **Latest Snapshot Storage** | Manifest duplicated in `T2.json` and `current.json` | Manifest in `current.json`; archived on next sync |
 | **Restore Traversal Logic** | Strictly greater-than (`snap.created_at > target`) | **Inclusive** (`snap.created_at >= target`) |
 | **Pre-Sync Remote Dependency** | None (timestamp generated locally) | **Requires reading `current.json`** prior to sync |
+| **Compaction Directory Collisions** | **None** ($V_C$ sits outside range in `diffs/T4`) | **Collision** ($V_A$ and $V_C$ both in range; requires routing $V_A \to S_{prev}$) |
 | **First Backup Baseline** | Creates empty/dummy `diffs/` | **Naturally skips diff creation** |
 | **CLI `list` Source** | Reads `.meta/manifests/*.json` | Reads `.meta/manifests/*.json` + `current.json` |
-| **Compaction Code (`compact.rs`)** | Baseline offset mapping | **Updated `classify_diff_files` to retain anchor diffs** |
+| **Compaction Code (`compact.rs`)** | Clean range isolation | Requires backward delta redistribution |
 | **Crash Recovery / Journaling** | Standard idempotent resume | Standard idempotent resume |
 
 ---
 
 ## 12. Conclusion & Summary
 
-The proposed **Predecessor Archival Model (Model B)** is mathematically sound and brings valuable ergonomic symmetry to `incr-backup`:
-1. It eliminates the confusing semantic inversion of finding $T_1$ file versions inside a directory stamped $T_2$.
-2. It changes restore traversal to a natural inclusive search (`diffs/T1` $\to$ `diffs/T2` $\to \dots \to$ `current/`).
-3. It cleanly represents active vs. archived snapshots, with custom `--name` labels working seamlessly.
-4. Implementing it requires updates across `sync.rs` (read `current.json` pre-sync), `restore.rs` (inclusive search), `compact.rs` (update classification to preserve anchor diffs), and `catalog.rs` / `list` (display active snapshot).
+1. **Why Model B is Attractive:**
+   - It eliminates the confusing semantic inversion where files valid at $T_1$ sit inside a folder stamped $T_2$.
+   - It provides a clean 1:1 match between manifests and diff directories for all archived snapshots.
+   - It enables intuitive inclusive search (`diffs/T1` $\to$ `diffs/T2` $\to \dots \to$ `current/`) during restore.
+
+2. **The Major Compromise in Model B:**
+   - **Compaction complexity:** In Model B, the compaction range contains both the backward deltas needed by pre-range snapshots ($V_A$) and the exit deltas needed by the anchor snapshot ($V_C$). Because a single diff directory cannot store two versions of the same file path, Model B must route backward deltas into `diffs/S_prev/` (breaking strict range isolation) or adopt multi-version path naming.
+   - In contrast, Model A keeps exit deltas in the subsequent snapshot (`diffs/T4`, outside the range), completely avoiding directory collisions.
